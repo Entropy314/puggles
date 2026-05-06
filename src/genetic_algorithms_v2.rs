@@ -193,6 +193,28 @@ impl<'a> GeneticAlgorithm<'a> for NSGAII<'a> {
     }
 
     fn evaluate_population(&mut self, population: &mut Vec<Solution<'a>>) {
+        // Batch path: call the batch objective function once with all unevaluated solutions.
+        // Enables Python-side parallelism (multiprocessing / ProcessPoolExecutor).
+        if let Some(batch_fn) = self.problem.batch_objective_function {
+            let unevaluated: Vec<usize> = population.iter().enumerate()
+                .filter(|(_, s)| !s.evaluated)
+                .map(|(i, _)| i)
+                .collect();
+            if !unevaluated.is_empty() {
+                let inputs: Vec<Vec<f64>> = unevaluated.iter()
+                    .map(|&i| population[i].solution.clone())
+                    .collect();
+                let outputs = batch_fn(&inputs);
+                for (local_i, &global_i) in unevaluated.iter().enumerate() {
+                    population[global_i].objective_fitness_values = outputs[local_i].clone();
+                    population[global_i].evaluated = true;
+                    population[global_i].feasible = true;
+                }
+                self.nfe.fetch_add(unevaluated.len(), Ordering::Relaxed);
+            }
+            return;
+        }
+
         // GPU path: batch-evaluate via wgpu compute shader.
         #[cfg(feature = "gpu")]
         if self.execution_mode == ExecutionMode::GPU {

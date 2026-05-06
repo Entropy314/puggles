@@ -12,7 +12,11 @@ pub struct Problem {
     pub objective_constraint_operands: Option<Vec<Option<String>>>, // Operands for Greater than or less than the objective constraint eg. ["<", ">"]
     pub direction: Option<Vec<i8>>, // Defaults vector to -1 with length of number_of_objectives eg. [-1, -1]
     pub solution_data_types: Vec<SolutionDataTypes>,     // solution type is a vector of the solution types eg. [BitBinary, Integer(lower_bound:Some(10), upper_bound:Some(20)), Real(lower_bound:Some(1.0), upper_bound:Some(20.0))]
-    pub objective_function: fn(solution: &Vec<f64>) -> Vec<f64> // Objective function that takes the SolutionTypes vector values and returns a vector of f64 values
+    pub objective_function: fn(solution: &Vec<f64>) -> Vec<f64>, // Objective function that takes the SolutionTypes vector values and returns a vector of f64 values
+    /// Optional batch evaluator. When set, the GA calls this once per generation with all
+    /// unevaluated solutions instead of calling `objective_function` one-by-one.
+    /// Enables Python-side parallelism via multiprocessing/ProcessPoolExecutor.
+    pub batch_objective_function: Option<fn(solutions: &Vec<Vec<f64>>) -> Vec<Vec<f64>>>,
 }
 
 impl Problem {
@@ -58,7 +62,8 @@ impl Problem {
             objective_constraint_operands,
             direction,
             solution_data_types,
-            objective_function
+            objective_function,
+            batch_objective_function: None,
         }
     }
 

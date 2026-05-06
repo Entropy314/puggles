@@ -6,9 +6,9 @@ use std::collections::HashMap;
 
 /// Trait for crossover operations
 pub trait Crossover<'a> {
-    fn crossover(&self, parent1: &'a Solution<'a>, parent2: &'a Solution<'a>) -> (Solution<'a>, Solution<'a>);
+    fn crossover(&self, parent1: &Solution<'a>, parent2: &Solution<'a>) -> (Solution<'a>, Solution<'a>);
 
-    fn evolve(&self, parents: &'a [Solution<'a>]) -> Vec<Solution<'a>> {
+    fn evolve(&self, parents: &[Solution<'a>]) -> Vec<Solution<'a>> {
         parents.chunks_exact(2).flat_map(|pair| {
             let (child1, child2) = self.crossover(&pair[0], &pair[1]);
             vec![child1, child2]
@@ -61,7 +61,7 @@ impl SimulatedBinaryCrossover {
 }
 
 impl<'a> Crossover<'a> for SimulatedBinaryCrossover {
-    fn crossover(&self, parent1: &'a Solution<'a>, parent2: &'a Solution<'a>) -> (Solution<'a>, Solution<'a>) {
+    fn crossover(&self, parent1: &Solution<'a>, parent2: &Solution<'a>) -> (Solution<'a>, Solution<'a>) {
         let mut child1 = parent1.clone();
         let mut child2 = parent2.clone();
         // println!("Parent1: {:?}", parent1.solution);
@@ -108,7 +108,7 @@ impl DifferentialEvolutionCrossover {
 }
 
 impl<'a> Crossover<'a> for DifferentialEvolutionCrossover {
-    fn crossover(&self, parent1: &'a Solution<'a>, parent2: &'a Solution<'a>) -> (Solution<'a>, Solution<'a>) {
+    fn crossover(&self, parent1: &Solution<'a>, parent2: &Solution<'a>) -> (Solution<'a>, Solution<'a>) {
         let mut child1 = parent1.clone();
         let mut child2 = parent2.clone();
 
@@ -147,7 +147,7 @@ pub struct ParentCentricCrossover {
 }
 
 impl<'a> Crossover<'a> for ParentCentricCrossover {
-    fn crossover(&self, parent1: &'a Solution<'a>, parent2: &'a Solution<'a>) -> (Solution<'a>, Solution<'a>) {
+    fn crossover(&self, parent1: &Solution<'a>, parent2: &Solution<'a>) -> (Solution<'a>, Solution<'a>) {
         let mut child1 = parent1.clone();
         let mut child2 = parent2.clone();
         // println!("Parent1: {:?}", parent1);
@@ -215,7 +215,7 @@ pub struct UnimodalDistributionCrossover {
 }
 
 impl<'a> Crossover<'a> for UnimodalDistributionCrossover {
-    fn crossover(&self, parent1: &'a Solution<'a>, parent2: &'a Solution<'a>) -> (Solution<'a>, Solution<'a>) {
+    fn crossover(&self, parent1: &Solution<'a>, parent2: &Solution<'a>) -> (Solution<'a>, Solution<'a>) {
         let mut child1 = parent1.clone();
         let mut child2 = parent2.clone();
         // println!("Parent1: {:?}", parent1);
@@ -257,7 +257,7 @@ pub struct BlendCrossover {
 }
 
 impl<'a> Crossover<'a> for BlendCrossover {
-    fn crossover(&self, parent1: &'a Solution<'a>, parent2: &'a Solution<'a>) -> (Solution<'a>, Solution<'a>) {
+    fn crossover(&self, parent1: &Solution<'a>, parent2: &Solution<'a>) -> (Solution<'a>, Solution<'a>) {
         let mut child1 = parent1.clone();
         let mut child2 = parent2.clone();
         // println!("Parent1: {:?}", parent1);
@@ -293,7 +293,7 @@ pub struct UniformCrossover {
 }
 
 impl<'a> Crossover<'a> for UniformCrossover {
-    fn crossover(&self, parent1: &'a Solution<'a>, parent2: &'a Solution<'a>) -> (Solution<'a>, Solution<'a>) {
+    fn crossover(&self, parent1: &Solution<'a>, parent2: &Solution<'a>) -> (Solution<'a>, Solution<'a>) {
         let mut child1 = parent1.clone();
         let mut child2 = parent2.clone();
         // println!("Parent1: {:?}", parent1);
@@ -342,7 +342,7 @@ pub struct ArithmeticCrossover {
 }
 
 impl<'a> Crossover<'a> for ArithmeticCrossover {
-    fn crossover(&self, parent1: &'a Solution<'a>, parent2: &'a Solution<'a>) -> (Solution<'a>, Solution<'a>) {
+    fn crossover(&self, parent1: &Solution<'a>, parent2: &Solution<'a>) -> (Solution<'a>, Solution<'a>) {
         let mut child1 = parent1.clone();
         let mut child2 = parent2.clone();
         // println!("Parent1: {:?}", parent1);
@@ -372,10 +372,10 @@ impl<'a> Crossover<'a> for ArithmeticCrossover {
 
 /// CrossoverManager to manage and apply different crossover operations
 pub struct CrossoverManager<'a> {
-    default_real_crossover: Box<dyn Crossover<'a>>,
-    default_integer_crossover: Box<dyn Crossover<'a>>,
-    default_binary_crossover: Box<dyn Crossover<'a>>,
-    custom_crossovers: HashMap<usize, Box<dyn Crossover<'a>>>,
+    default_real_crossover: Box<dyn Crossover<'a> + Send>,
+    default_integer_crossover: Box<dyn Crossover<'a> + Send>,
+    default_binary_crossover: Box<dyn Crossover<'a> + Send>,
+    custom_crossovers: HashMap<usize, Box<dyn Crossover<'a> + Send>>,
 }
 
 impl<'a> CrossoverManager<'a> {
@@ -390,30 +390,30 @@ impl<'a> CrossoverManager<'a> {
     }
 
     /// Sets a custom crossover for a specific index
-    pub fn set_custom_crossover(&mut self, index: usize, crossover: Box<dyn Crossover<'a>>) {
+    pub fn set_custom_crossover(&mut self, index: usize, crossover: Box<dyn Crossover<'a> + Send>) {
         self.custom_crossovers.insert(index, crossover);
     }
 
     /// Sets the default crossover for Real types
-    pub fn set_default_real_crossover(&mut self, crossover: Box<dyn Crossover<'a>>) {
+    pub fn set_default_real_crossover(&mut self, crossover: Box<dyn Crossover<'a> + Send>) {
         self.default_real_crossover = crossover;
     }
 
     /// Sets the default crossover for Integer types
-    pub fn set_default_integer_crossover(&mut self, crossover: Box<dyn Crossover<'a>>) {
+    pub fn set_default_integer_crossover(&mut self, crossover: Box<dyn Crossover<'a> + Send>) {
         self.default_integer_crossover = crossover;
     }
 
     /// Sets the default crossover for BitBinary types
-    pub fn set_default_binary_crossover(&mut self, crossover: Box<dyn Crossover<'a>>) {
+    pub fn set_default_binary_crossover(&mut self, crossover: Box<dyn Crossover<'a> + Send>) {
         self.default_binary_crossover = crossover;
     }
 
     /// Performs crossover on the given parents and returns the children
     pub fn perform_crossover(
         &self,
-        parent1: &'a Solution<'a>,
-        parent2: &'a Solution<'a>,
+        parent1: &Solution<'a>,
+        parent2: &Solution<'a>,
     ) -> Vec<Solution<'a>> {
         let mut child1 = parent1.clone();
         let mut child2 = parent2.clone();
@@ -467,6 +467,7 @@ mod tests {
                 SolutionDataTypes::Real(Real::new(Some(10.0), Some(1000.0))),
             ],
             objective_function: |x| vec![x.iter().sum()],
+            batch_objective_function: None,
         }
     }
     // Create solutions

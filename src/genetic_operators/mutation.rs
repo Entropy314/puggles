@@ -36,6 +36,18 @@ impl<'a> MutationManager<'a> {
         self.custom_mutations.insert(index, mutation);
     }
 
+    pub fn set_default_real_mutation(&mut self, mutation: Arc<dyn Mutation<'a>>) {
+        self.default_mutations.insert("Real", mutation);
+    }
+
+    pub fn set_default_integer_mutation(&mut self, mutation: Arc<dyn Mutation<'a>>) {
+        self.default_mutations.insert("Integer", mutation);
+    }
+
+    pub fn set_default_binary_mutation(&mut self, mutation: Arc<dyn Mutation<'a>>) {
+        self.default_mutations.insert("BitBinary", mutation);
+    }
+
     /// Applies mutations to the parent solution and returns the mutated child
     // pub fn mutate(&self, parent: &'a Solution<'a>) -> Solution<'a> {
     //     let mut child = parent.clone();
@@ -294,6 +306,7 @@ mod tests {
                 SolutionDataTypes::Real(Real::new(Some(-100.0), Some(1000.0))),
             ],
             objective_function: |x| vec![x.iter().sum()],
+            batch_objective_function: None,
         }
     }
 

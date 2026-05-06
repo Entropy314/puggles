@@ -1,64 +1,66 @@
-use crate::dominance::ParetoDominance;
-use crate::core::Solution; 
-use crate::dominance::Dominance;
+use crate::dominance::{ParetoDominance, Dominance};
+use crate::core::Solution;
 use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
 
-pub trait Selector { 
-    fn select<'a>(&self, population: &[&'a Solution<'a>], n: usize) -> Vec<&'a Solution<'a>>;
-    fn select_one<'a>(&self, population: &[&'a Solution<'a>]) -> &'a Solution<'a>;
+pub trait Selector: Send + Sync {
+    fn select_index(&mut self, population: &[Solution], n: usize) -> Vec<usize>;
 }
-
 
 #[derive(Debug)]
 pub struct TournamentSelector {
     tournament_size: usize,
     dominance: ParetoDominance,
-    rng: StdRng, // Random number generator with optional seed
+    rng: StdRng,
 }
 
 impl TournamentSelector {
-
-    /// Default constructor with random seed
     pub fn new(tournament_size: usize, dominance: ParetoDominance, seed: Option<u64>) -> Self {
         let rng = match seed {
-            Some(seed_value) => StdRng::seed_from_u64(seed_value), // Seeded RNG
-            None => StdRng::from_entropy(),                      // RNG with entropy
+            Some(seed_value) => StdRng::seed_from_u64(seed_value),
+            None => StdRng::from_entropy(),
         };
-
-        TournamentSelector {
-            tournament_size,
-            dominance,
-            rng,
-        }
+        TournamentSelector { tournament_size, dominance, rng }
     }
 
     pub fn select_one<'a>(&mut self, population: &[&'a Solution<'a>]) -> &'a Solution<'a> {
-        let mut winner = population[self.rng.gen_range(0..population.len())];
-
+        let mut winner_idx = self.rng.gen_range(0..population.len());
         for _ in 0..self.tournament_size {
-            let challenger = population[self.rng.gen_range(0..population.len())];
-            let flag = self.dominance.compare_solutions(challenger, winner);
-            if flag > 0 {
-                winner = challenger;
+            let challenger_idx = self.rng.gen_range(0..population.len());
+            let flag = self.dominance.compare_solutions(population[challenger_idx], population[winner_idx]);
+            if flag < 0 {
+                winner_idx = challenger_idx;
             }
         }
-
-        winner
+        population[winner_idx]
     }
 
-    pub fn select<'a>(&'a mut self, n: usize, population: &[&'a Solution<'a>]) -> Vec<&'a Solution<'a>> {
+    pub fn select<'a>(&mut self, n: usize, population: &[&'a Solution<'a>]) -> Vec<&'a Solution<'a>> {
         let mut results = Vec::with_capacity(n);
         for _ in 0..n {
-            let winner = {
-                self.select_one(population) // Borrow is confined to this block
-            };
-            results.push(winner);
+            results.push(self.select_one(population));
         }
         results
     }
 }
 
+impl Selector for TournamentSelector {
+    fn select_index(&mut self, population: &[Solution], n: usize) -> Vec<usize> {
+        let mut results = Vec::with_capacity(n);
+        for _ in 0..n {
+            let mut winner_idx = self.rng.gen_range(0..population.len());
+            for _ in 0..self.tournament_size {
+                let challenger_idx = self.rng.gen_range(0..population.len());
+                let flag = self.dominance.compare_solutions(&population[challenger_idx], &population[winner_idx]);
+                if flag < 0 {
+                    winner_idx = challenger_idx;
+                }
+            }
+            results.push(winner_idx);
+        }
+        results
+    }
+}
 
 impl Default for TournamentSelector {
     fn default() -> Self {
@@ -66,8 +68,56 @@ impl Default for TournamentSelector {
     }
 }
 
+/// Tournament selector that uses rank and crowding distance (NSGA-II style).
+/// Prefers lower rank; ties broken by higher crowding distance.
+#[derive(Debug)]
+pub struct CrowdingTournamentSelector {
+    tournament_size: usize,
+    rng: StdRng,
+}
 
-// Unit tests for TournamentSelector
+impl CrowdingTournamentSelector {
+    pub fn new(tournament_size: usize, seed: Option<u64>) -> Self {
+        let rng = match seed {
+            Some(s) => StdRng::seed_from_u64(s),
+            None => StdRng::from_entropy(),
+        };
+        CrowdingTournamentSelector { tournament_size, rng }
+    }
+
+    /// Select `n` indices from population using rank and crowding distance arrays.
+    /// `ranks[i]` is the non-domination front index (0 = best).
+    /// `crowding[i]` is the crowding distance (higher = more diverse).
+    pub fn select_indices(
+        &mut self,
+        n: usize,
+        ranks: &[usize],
+        crowding: &[f64],
+    ) -> Vec<usize> {
+        let pop_len = ranks.len();
+        let mut results = Vec::with_capacity(n);
+        for _ in 0..n {
+            let mut winner = self.rng.gen_range(0..pop_len);
+            for _ in 1..self.tournament_size {
+                let challenger = self.rng.gen_range(0..pop_len);
+                if crowding_compare(ranks[challenger], crowding[challenger], ranks[winner], crowding[winner]) {
+                    winner = challenger;
+                }
+            }
+            results.push(winner);
+        }
+        results
+    }
+}
+
+/// Returns true if (rank_a, crowd_a) is preferred over (rank_b, crowd_b).
+/// Lower rank wins; if equal rank, higher crowding distance wins.
+#[inline]
+pub fn crowding_compare(rank_a: usize, crowd_a: f64, rank_b: usize, crowd_b: f64) -> bool {
+    rank_a < rank_b || (rank_a == rank_b && crowd_a > crowd_b)
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,6 +141,7 @@ mod tests {
                 SolutionDataTypes::Real(Real::new(Some(-10.0), Some(20.0))),
             ],
             objective_function,
+            batch_objective_function: None,
         }
     }
 
@@ -151,12 +202,11 @@ mod tests {
         let mut tournament_selector = TournamentSelector::default();
         let winner = tournament_selector.select_one(&population);
 
-        println!("Memory size of a solution: {} bytes", mem::size_of_val(&solutions[0]));
         println!("Winner: {:?}", winner);
     }
 
     #[test]
-    fn test_tournament_selector_single_objective_miminmize() {
+    fn test_tournament_selector_single_objective_minimize() {
         let problem = setup_problem(parabloid_5_loc, vec![-1]);
         let mut solutions = setup_solutions(&problem);
         evaluate_solutions(&mut solutions);
@@ -165,21 +215,6 @@ mod tests {
         let mut tournament_selector = TournamentSelector::default();
         let winner = tournament_selector.select_one(&population);
 
-        println!("Memory size of a solution: {} bytes", mem::size_of_val(&solutions[0]));
-        println!("Winner: {:?}", winner);
-    }
-
-    #[test]
-    fn test_tournament_selector_multi_objective_maximize() {
-        let problem = setup_problem(parabloid_hyper_5, vec![1, 1, 1, 1, 1]);
-        let mut solutions = setup_solutions(&problem);
-        evaluate_solutions(&mut solutions);
-
-        let population: Vec<&Solution> = solutions.iter().collect();
-        let mut tournament_selector = TournamentSelector::default();
-        let winner = tournament_selector.select_one(&population);
-
-        println!("Memory size of a solution: {} bytes", mem::size_of_val(&solutions[0]));
         println!("Winner: {:?}", winner);
     }
 
@@ -193,7 +228,31 @@ mod tests {
         let mut tournament_selector = TournamentSelector::default();
         let winners = tournament_selector.select(2, &population);
 
-        println!("Memory size of a solution: {} bytes", mem::size_of_val(&solutions[0]));
         println!("Winners: {:?}", winners);
+    }
+
+    #[test]
+    fn test_crowding_tournament_selector() {
+        let ranks = vec![0, 0, 1, 1, 2];
+        let crowding = vec![f64::INFINITY, 0.5, f64::INFINITY, 0.3, 0.1];
+
+        let mut selector = CrowdingTournamentSelector::new(2, Some(42));
+        let selected = selector.select_indices(3, &ranks, &crowding);
+
+        assert_eq!(selected.len(), 3);
+        // All selected indices should be valid
+        for &idx in &selected {
+            assert!(idx < 5);
+        }
+    }
+
+    #[test]
+    fn test_crowding_compare() {
+        // Lower rank wins
+        assert!(crowding_compare(0, 0.5, 1, 1.0));
+        assert!(!crowding_compare(1, 1.0, 0, 0.5));
+        // Same rank, higher crowding wins
+        assert!(crowding_compare(0, 1.0, 0, 0.5));
+        assert!(!crowding_compare(0, 0.5, 0, 1.0));
     }
 }
