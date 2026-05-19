@@ -1,26 +1,24 @@
-use crate::core::{Solution, Problem};
-use crate::gatypes::{SolutionDataTypes, Real};
-use rand::rngs::ThreadRng;
+use crate::core::Solution;
+use crate::gatypes::SolutionDataTypes;
 use std::collections::HashMap;
 use std::sync::Arc;
 use rand::Rng;
 
 /// Trait for mutation operations
-/// Trait for mutation operations
-pub trait Mutation<'a>: Send + Sync {
-    fn mutate(&self, parent: &'a Solution<'a>, index: usize) -> f64;
+pub trait Mutation: Send + Sync {
+    fn mutate(&self, parent: &Solution, index: usize) -> f64;
 }
 /// MutationManager to manage and apply mutations
-pub struct MutationManager<'a> {
-    default_mutations: HashMap<&'static str, Arc<dyn Mutation<'a>>>,
-    custom_mutations: HashMap<usize, Arc<dyn Mutation<'a>>>,
+pub struct MutationManager {
+    default_mutations: HashMap<&'static str, Arc<dyn Mutation>>,
+    custom_mutations: HashMap<usize, Arc<dyn Mutation>>,
 
 }
 
-impl<'a> MutationManager<'a> {
+impl MutationManager {
     /// Creates a new MutationManager with default mutations
     pub fn new() -> Self {
-        let mut default_mutations: HashMap<&'static str, Arc<dyn Mutation<'a>>> = HashMap::new();
+        let mut default_mutations: HashMap<&'static str, Arc<dyn Mutation>> = HashMap::new();
         default_mutations.insert("BitBinary", Arc::new(BitFlipMutation::default()));
         default_mutations.insert("Real", Arc::new(UniformMutation::default()));
         default_mutations.insert("Integer", Arc::new(UniformMutation::default()));
@@ -32,46 +30,23 @@ impl<'a> MutationManager<'a> {
     }
 
     /// Sets a custom mutation for a specific index
-    pub fn set_custom_mutation(&mut self, index: usize, mutation: Arc<dyn Mutation<'a>>) {
+    pub fn set_custom_mutation(&mut self, index: usize, mutation: Arc<dyn Mutation>) {
         self.custom_mutations.insert(index, mutation);
     }
 
-    pub fn set_default_real_mutation(&mut self, mutation: Arc<dyn Mutation<'a>>) {
+    pub fn set_default_real_mutation(&mut self, mutation: Arc<dyn Mutation>) {
         self.default_mutations.insert("Real", mutation);
     }
 
-    pub fn set_default_integer_mutation(&mut self, mutation: Arc<dyn Mutation<'a>>) {
+    pub fn set_default_integer_mutation(&mut self, mutation: Arc<dyn Mutation>) {
         self.default_mutations.insert("Integer", mutation);
     }
 
-    pub fn set_default_binary_mutation(&mut self, mutation: Arc<dyn Mutation<'a>>) {
+    pub fn set_default_binary_mutation(&mut self, mutation: Arc<dyn Mutation>) {
         self.default_mutations.insert("BitBinary", mutation);
     }
 
-    /// Applies mutations to the parent solution and returns the mutated child
-    // pub fn mutate(&self, parent: &'a Solution<'a>) -> Solution<'a> {
-    //     let mut child = parent.clone();
-
-    //     for (i, solution_type) in parent.problem.solution_data_types.iter().enumerate() {
-    //         let mutation = self.custom_mutations.get(&i).cloned().or_else(|| {
-    //             match solution_type {
-    //                 SolutionDataTypes::BitBinary(_) => self.default_mutations.get("BitBinary").cloned(),
-    //                 SolutionDataTypes::Real(_) => self.default_mutations.get("Real").cloned(),
-    //                 SolutionDataTypes::Integer(_) => self.default_mutations.get("Integer").cloned(),
-    //                 _ => None,
-    //             }
-    //         });
-
-    //         if let Some(mutation) = mutation {
-    //             child.solution[i] = mutation.mutate(parent, i);
-    //         }
-    //     }
-
-    //     child.feasible = false;
-    //     child.evaluated = false;
-    //     child
-    // }
-    pub fn mutate(&self, parent: &'a Solution<'a>) -> Solution<'a> {
+    pub fn mutate(&self, parent: &Solution) -> Solution {
         let mut child = parent.clone();
         for (i, solution_type) in parent.problem.solution_data_types.iter().enumerate() {
             let mutation = self
@@ -131,8 +106,8 @@ impl Default for BitFlipMutation {
     }
 }
 
-impl<'a> Mutation<'a> for BitFlipMutation {
-    fn mutate(&self, parent: &'a Solution<'a>, index: usize) -> f64 {
+impl Mutation for BitFlipMutation {
+    fn mutate(&self, parent: &Solution, index: usize) -> f64 {
         let mut rng = rand::thread_rng();
         if rng.gen::<f64>() < self.probability {
             1.0 - parent.solution[index]
@@ -153,8 +128,8 @@ impl Default for UniformMutation {
     }
 }
 
-impl<'a> Mutation<'a> for UniformMutation {
-    fn mutate(&self, parent: &'a Solution<'a>, index: usize) -> f64 {
+impl Mutation for UniformMutation {
+    fn mutate(&self, parent: &Solution, index: usize) -> f64 {
         let mut rng = rand::thread_rng();
         match &parent.problem.solution_data_types[index] {
             SolutionDataTypes::Integer(integer) => {
@@ -196,8 +171,8 @@ impl PolynomialMutation {
     }
 }
 
-impl<'a> Mutation<'a> for PolynomialMutation {
-    fn mutate(&self, parent: &'a Solution<'a>, index: usize) -> f64 {
+impl Mutation for PolynomialMutation {
+    fn mutate(&self, parent: &Solution, index: usize) -> f64 {
         let mut rng = rand::thread_rng();
         match &parent.problem.solution_data_types[index] {
             SolutionDataTypes::Integer(integer) => {
@@ -266,8 +241,8 @@ impl GaussianMutation {
     }
 }
 
-impl<'a> Mutation<'a> for GaussianMutation {
-    fn mutate(&self, parent: &'a Solution<'a>, index: usize) -> f64 {
+impl Mutation for GaussianMutation {
+    fn mutate(&self, parent: &Solution, index: usize) -> f64 {
         let mut rng = rand::thread_rng();
         let lower_bound = parent.problem.solution_data_types[index]
             .get_lower_bound()
@@ -288,7 +263,8 @@ impl<'a> Mutation<'a> for GaussianMutation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{Problem, Solution};
+    use std::sync::Arc;
+    use crate::core::{EvalFn, Problem, Solution};
     use crate::gatypes::{SolutionDataTypes, Real, Integer, BitBinary};
 
     fn setup_problem() -> Problem {
@@ -305,30 +281,28 @@ mod tests {
                 SolutionDataTypes::Real(Real::new(Some(-100.0), Some(1000.0))),
                 SolutionDataTypes::Real(Real::new(Some(-100.0), Some(1000.0))),
             ],
-            objective_function: |x| vec![x.iter().sum()],
-            batch_objective_function: None,
+            eval_fn: EvalFn::Single(|x| vec![x.iter().sum()]),
         }
     }
 
-    fn setup_solution(problem: &Problem) -> Solution {
-        
+    fn setup_solution(problem: Arc<Problem>) -> Solution {
         Solution {
             problem,
             solution: vec![1.0, 10.0, 10.0, 10.0, 10.0],
-            objective_fitness_values: Vec::with_capacity(*problem.number_of_objectives()),
-            constraint_values: Vec::with_capacity(*problem.number_of_objectives()),
+            objective_fitness_values: Vec::new(),
+            constraint_values: Vec::new(),
             constraint_violation: 0,
             feasible: false,
             evaluated: false,
         }
     }
-    
+
 
      #[test]
     fn test_default_mutation_manager() {
-        let problem = setup_problem(); 
-        
-        let parent = setup_solution(&problem).clone();
+        let problem = Arc::new(setup_problem());
+
+        let parent = setup_solution(Arc::clone(&problem));
         {
             let mutation_manager = MutationManager::new();
             let child = mutation_manager.mutate(&parent);
@@ -344,10 +318,10 @@ mod tests {
 
     #[test]
     fn test_bit_flip_mutation() {
-        let problem = setup_problem(); 
+        let problem = Arc::new(setup_problem());
         let mutation = BitFlipMutation{probability: 1.0};
-        let parent1 = setup_solution(&problem);
-        let mut parent2 = setup_solution(&problem);
+        let parent1 = setup_solution(Arc::clone(&problem));
+        let mut parent2 = setup_solution(Arc::clone(&problem));
         parent2.solution[0] = 0.0;
         let child1 = mutation.mutate(&parent1, 0);
         let child2 = mutation.mutate(&parent2, 0);
@@ -356,9 +330,9 @@ mod tests {
     }
     #[test]
     fn test_polynomial_mutation_with_integer_and_real() {
-        let problem = setup_problem(); 
+        let problem = Arc::new(setup_problem());
 
-        let parent = setup_solution(&problem);
+        let parent = setup_solution(Arc::clone(&problem));
 
 
         let mutation = PolynomialMutation::new(Some(1.0), Some(20.0));
@@ -376,14 +350,14 @@ mod tests {
         assert!(child_solution_1 != parent.solution[2]);
         assert!(child_solution_2 != parent.solution[3]);
         assert!(child_solution_3 != parent.solution[4]);
-        
+
     }
 
     #[test]
     fn test_uniform_mutation_with_integer_and_real() {
-        let problem = setup_problem(); 
+        let problem = Arc::new(setup_problem());
 
-        let parent = setup_solution(&problem);
+        let parent = setup_solution(Arc::clone(&problem));
 
         let mutation = UniformMutation::default();
         let child_solution_0 = mutation.mutate(&parent, 1); // Integer mutation
@@ -400,14 +374,14 @@ mod tests {
         assert!(child_solution_1 != parent.solution[2]);
         assert!(child_solution_2 != parent.solution[3]);
         assert!(child_solution_3 != parent.solution[4]);
-    
+
     }
 
     #[test]
     fn test_gaussian_mutation_with_integer_and_real() {
-        let problem = setup_problem(); 
+        let problem = Arc::new(setup_problem());
 
-        let parent = setup_solution(&problem);
+        let parent = setup_solution(Arc::clone(&problem));
 
         let mutation = GaussianMutation::new(Some(1.0), Some(0.1));
         let child_solution_0 = mutation.mutate(&parent, 1); // Integer mutation

@@ -23,7 +23,7 @@ impl TournamentSelector {
         TournamentSelector { tournament_size, dominance, rng }
     }
 
-    pub fn select_one<'a>(&mut self, population: &[&'a Solution<'a>]) -> &'a Solution<'a> {
+    pub fn select_one<'a>(&mut self, population: &[&'a Solution]) -> &'a Solution {
         let mut winner_idx = self.rng.gen_range(0..population.len());
         for _ in 0..self.tournament_size {
             let challenger_idx = self.rng.gen_range(0..population.len());
@@ -35,7 +35,7 @@ impl TournamentSelector {
         population[winner_idx]
     }
 
-    pub fn select<'a>(&mut self, n: usize, population: &[&'a Solution<'a>]) -> Vec<&'a Solution<'a>> {
+    pub fn select<'a>(&mut self, n: usize, population: &[&'a Solution]) -> Vec<&'a Solution> {
         let mut results = Vec::with_capacity(n);
         for _ in 0..n {
             results.push(self.select_one(population));
@@ -121,8 +121,8 @@ pub fn crowding_compare(rank_a: usize, crowd_a: f64, rank_b: usize, crowd_b: f64
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::mem;
-    use crate::core::{Solution, Problem};
+    use std::sync::Arc;
+    use crate::core::{EvalFn, Solution, Problem};
     use crate::gatypes::{SolutionDataTypes, BitBinary, Integer, Real};
     use crate::benchmark_objective_functions::{parabloid_5_loc, parabloid_hyper_5};
 
@@ -140,45 +140,44 @@ mod tests {
                 SolutionDataTypes::Integer(Integer::new(Some(-100), Some(20))),
                 SolutionDataTypes::Real(Real::new(Some(-10.0), Some(20.0))),
             ],
-            objective_function,
-            batch_objective_function: None,
+            eval_fn: EvalFn::Single(objective_function),
         }
     }
 
-    fn setup_solutions(problem: &Problem) -> Vec<Solution> {
+    fn setup_solutions(problem: Arc<Problem>) -> Vec<Solution> {
         vec![
             Solution {
-                problem,
+                problem: Arc::clone(&problem),
                 solution: vec![1.0, 2.0, -3.0, 4.0, 5.0],
-                objective_fitness_values: Vec::with_capacity(*problem.number_of_objectives()),
-                constraint_values: Vec::with_capacity(*problem.number_of_objectives()),
+                objective_fitness_values: Vec::new(),
+                constraint_values: Vec::new(),
                 constraint_violation: 0,
                 feasible: false,
                 evaluated: false,
             },
             Solution {
-                problem,
+                problem: Arc::clone(&problem),
                 solution: vec![12.0, 10.0, -3.0, 4.0, 5.0],
-                objective_fitness_values: Vec::with_capacity(*problem.number_of_objectives()),
-                constraint_values: Vec::with_capacity(*problem.number_of_objectives()),
+                objective_fitness_values: Vec::new(),
+                constraint_values: Vec::new(),
                 constraint_violation: 0,
                 feasible: false,
                 evaluated: false,
             },
             Solution {
-                problem,
+                problem: Arc::clone(&problem),
                 solution: vec![-22.0, 12.0, -3.0, 1.0, 5.0],
-                objective_fitness_values: Vec::with_capacity(*problem.number_of_objectives()),
-                constraint_values: Vec::with_capacity(*problem.number_of_objectives()),
+                objective_fitness_values: Vec::new(),
+                constraint_values: Vec::new(),
                 constraint_violation: 0,
                 feasible: false,
                 evaluated: false,
             },
             Solution {
-                problem,
+                problem: Arc::clone(&problem),
                 solution: vec![1.0, 2.0, 3.0, 4.0, 5.0],
-                objective_fitness_values: Vec::with_capacity(*problem.number_of_objectives()),
-                constraint_values: Vec::with_capacity(*problem.number_of_objectives()),
+                objective_fitness_values: Vec::new(),
+                constraint_values: Vec::new(),
                 constraint_violation: 0,
                 feasible: false,
                 evaluated: false,
@@ -194,8 +193,8 @@ mod tests {
 
     #[test]
     fn test_tournament_selector_single_objective_maximize() {
-        let problem = setup_problem(parabloid_5_loc, vec![1]);
-        let mut solutions = setup_solutions(&problem);
+        let problem = Arc::new(setup_problem(parabloid_5_loc, vec![1]));
+        let mut solutions = setup_solutions(Arc::clone(&problem));
         evaluate_solutions(&mut solutions);
 
         let population: Vec<&Solution> = solutions.iter().collect();
@@ -207,8 +206,8 @@ mod tests {
 
     #[test]
     fn test_tournament_selector_single_objective_minimize() {
-        let problem = setup_problem(parabloid_5_loc, vec![-1]);
-        let mut solutions = setup_solutions(&problem);
+        let problem = Arc::new(setup_problem(parabloid_5_loc, vec![-1]));
+        let mut solutions = setup_solutions(Arc::clone(&problem));
         evaluate_solutions(&mut solutions);
 
         let population: Vec<&Solution> = solutions.iter().collect();
@@ -220,8 +219,8 @@ mod tests {
 
     #[test]
     fn test_selection_function() {
-        let problem = setup_problem(parabloid_hyper_5, vec![-1, -1, -1, -1, -1]);
-        let mut solutions = setup_solutions(&problem);
+        let problem = Arc::new(setup_problem(parabloid_hyper_5, vec![-1, -1, -1, -1, -1]));
+        let mut solutions = setup_solutions(Arc::clone(&problem));
         evaluate_solutions(&mut solutions);
 
         let population: Vec<&Solution> = solutions.iter().collect();

@@ -4,7 +4,7 @@ use rand::Rng;
 
 
 // Create Enum for types called SolutionType
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum SolutionDataTypes {
     Real(Real),
     Integer(Integer),
@@ -50,8 +50,8 @@ pub enum BinaryDataType {
 }
 
 
-#[derive(Debug)]
-pub struct BitBinary { 
+#[derive(Debug, Clone)]
+pub struct BitBinary {
 }
 
 // create a method on BitBinary that randomly genrates a 1 or 0 for value
@@ -69,7 +69,7 @@ impl BitBinary {
 
 
 // Create an Integer object where the lower and upper bounds are optional parameters
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Integer {
     pub lower_bound: Option<i64>,
     pub upper_bound: Option<i64>
@@ -98,8 +98,8 @@ impl Integer {
     }
 }
 
-#[derive(Debug)]
-pub struct Real { 
+#[derive(Debug, Clone)]
+pub struct Real {
     pub lower_bound: Option<f64>,
     pub upper_bound: Option<f64>
 }

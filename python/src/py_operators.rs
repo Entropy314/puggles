@@ -26,6 +26,14 @@ pub struct PyCrossoverConfig {
     pub blend_alpha: f64,
     #[pyo3(get, set)]
     pub uniform_probability: f64,
+    #[pyo3(get, set)]
+    pub pcx_nparents: usize,
+    #[pyo3(get, set)]
+    pub pcx_noffspring: usize,
+    #[pyo3(get, set)]
+    pub pcx_eta: f64,
+    #[pyo3(get, set)]
+    pub pcx_zeta: f64,
 }
 
 #[pymethods]
@@ -41,6 +49,10 @@ impl PyCrossoverConfig {
         de_scaling_factor = 0.8,
         blend_alpha = 0.5,
         uniform_probability = 1.0,
+        pcx_nparents = 2,
+        pcx_noffspring = 2,
+        pcx_eta = 0.1,
+        pcx_zeta = 0.1,
     ))]
     fn new(
         real_crossover: &str,
@@ -52,6 +64,10 @@ impl PyCrossoverConfig {
         de_scaling_factor: f64,
         blend_alpha: f64,
         uniform_probability: f64,
+        pcx_nparents: usize,
+        pcx_noffspring: usize,
+        pcx_eta: f64,
+        pcx_zeta: f64,
     ) -> Self {
         PyCrossoverConfig {
             real_crossover: real_crossover.to_string(),
@@ -63,6 +79,10 @@ impl PyCrossoverConfig {
             de_scaling_factor,
             blend_alpha,
             uniform_probability,
+            pcx_nparents,
+            pcx_noffspring,
+            pcx_eta,
+            pcx_zeta,
         }
     }
 

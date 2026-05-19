@@ -36,29 +36,36 @@
 /// ```
 
 use pyo3::prelude::*;
-use rustypus::core::Problem;
+use rustypus::core::{EvalFn, Problem};
 use rustypus::gpu_evaluator::GpuEvaluator;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::cell::RefCell;
+use std::sync::Arc;
 
 use crate::py_problem::ProblemStore;
 use crate::py_types::parse_data_types;
 
-static GPU_ID_COUNTER: AtomicU64 = AtomicU64::new(1_000_000);
+// ---------------------------------------------------------------------------
+// Thread-local GPU evaluator
+// ---------------------------------------------------------------------------
 
-/// Shared GPU evaluator stored globally so the batch trampoline can access it.
-fn gpu_evaluator_store() -> &'static Mutex<Option<Arc<GpuEvaluator>>> {
-    static INSTANCE: OnceLock<Mutex<Option<Arc<GpuEvaluator>>>> = OnceLock::new();
-    INSTANCE.get_or_init(|| Mutex::new(None))
+thread_local! {
+    static TLS_GPU_EVALUATOR: RefCell<Option<Arc<GpuEvaluator>>> = RefCell::new(None);
 }
 
-/// Batch trampoline (Rust function pointer) for GPU evaluation.
 fn gpu_batch_trampoline(inputs: &Vec<Vec<f64>>) -> Vec<Vec<f64>> {
-    let guard = gpu_evaluator_store().lock().unwrap();
-    guard
-        .as_ref()
-        .expect("GpuEvaluator not initialised — create GpuProblem before calling run()")
-        .evaluate_batch(inputs)
+    TLS_GPU_EVALUATOR.with(|cell| {
+        let borrow = cell.borrow();
+        borrow.as_ref()
+            .expect("No active GPU evaluator — was activate_gpu_evaluator() called before run()?")
+            .evaluate_batch(inputs)
+    })
+}
+
+pub fn activate_gpu_evaluator(evaluator: Arc<GpuEvaluator>) {
+    TLS_GPU_EVALUATOR.with(|c| *c.borrow_mut() = Some(evaluator));
+}
+pub fn deactivate_gpu_evaluator() {
+    TLS_GPU_EVALUATOR.with(|c| *c.borrow_mut() = None);
 }
 
 /// An optimization Problem whose objective function runs on the GPU via a WGSL compute shader.
@@ -103,31 +110,24 @@ impl PyGpuProblem {
             solution_length,
             number_of_objectives,
         ));
-        *gpu_evaluator_store().lock().unwrap() = Some(Arc::clone(&evaluator));
 
-        // Placeholder single-eval function — never called; GPU uses the batch trampoline.
-        fn placeholder(_: &Vec<f64>) -> Vec<f64> { Vec::new() }
-
-        let mut problem = Problem::new(
+        // Use EvalFn::Batch with the GPU batch trampoline.
+        let problem = Arc::new(Problem {
             solution_length,
             number_of_objectives,
-            None,
-            None,
-            direction,
-            data_types,
-            placeholder,
-        );
-        problem.batch_objective_function = Some(gpu_batch_trampoline);
-
-        let problem_id = GPU_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+            objective_constraint: None,
+            objective_constraint_operands: None,
+            direction: direction.or_else(|| Some(vec![-1; number_of_objectives])),
+            solution_data_types: data_types,
+            eval_fn: EvalFn::Batch(gpu_batch_trampoline),
+        });
 
         Ok(PyGpuProblem {
             store: ProblemStore {
                 problem,
-                problem_id,
-                uses_python_callable: false,
-                // GPU trampoline is Rust-native; GIL release is safe in PyNSGAII::run
-                uses_batch_callable: false,
+                callable: None,
+                batch_callable: None,
+                gpu_evaluator: Some(evaluator),
             },
         })
     }

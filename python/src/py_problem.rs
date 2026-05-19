@@ -1,93 +1,64 @@
 use pyo3::prelude::*;
-use rustypus::core::Problem;
+use rustypus::core::{EvalFn, Problem};
 use rustypus::gatypes::SolutionDataTypes;
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::cell::RefCell;
+use std::sync::Arc;
 
 use crate::py_types::parse_data_types;
 
-// Global unique ID counter for problems
-static PROBLEM_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
-
 // ---------------------------------------------------------------------------
-// Single-evaluation callable registry
+// Thread-local storage for active callables
 // ---------------------------------------------------------------------------
 
-fn callable_registry() -> &'static Mutex<HashMap<u64, Py<PyAny>>> {
-    static INSTANCE: OnceLock<Mutex<HashMap<u64, Py<PyAny>>>> = OnceLock::new();
-    INSTANCE.get_or_init(|| Mutex::new(HashMap::new()))
+thread_local! {
+    static TLS_CALLABLE: RefCell<Option<Py<PyAny>>> = RefCell::new(None);
+    static TLS_BATCH_CALLABLE: RefCell<Option<Py<PyAny>>> = RefCell::new(None);
 }
 
-fn active_problem_id() -> &'static Mutex<u64> {
-    static INSTANCE: OnceLock<Mutex<u64>> = OnceLock::new();
-    INSTANCE.get_or_init(|| Mutex::new(0))
-}
-
-/// Trampoline function matching `fn(&Vec<f64>) -> Vec<f64>`.
-/// Looks up the Python callable from the global registry and calls it via the GIL.
 fn python_objective_trampoline(input: &Vec<f64>) -> Vec<f64> {
-    let problem_id = *active_problem_id().lock().unwrap();
-    let registry = callable_registry().lock().unwrap();
-    let callable = registry
-        .get(&problem_id)
-        .expect("Python callable not found in registry — was the Problem dropped?");
-    Python::with_gil(|py| {
-        let py_list = pyo3::types::PyList::new(py, input).unwrap();
-        let result = callable
-            .call1(py, (py_list,))
-            .expect("Python objective function raised an exception");
-        result
-            .extract::<Vec<f64>>(py)
-            .expect("Python objective function must return a list of floats")
+    TLS_CALLABLE.with(|cell| {
+        let borrow = cell.borrow();
+        let callable = borrow.as_ref()
+            .expect("No active Python callable — was activate_callable() called before run()?");
+        Python::with_gil(|py| {
+            let py_list = pyo3::types::PyList::new(py, input).unwrap();
+            callable.call1(py, (py_list,))
+                .expect("Python objective function raised an exception")
+                .extract::<Vec<f64>>(py)
+                .expect("Python objective function must return a list of floats")
+        })
     })
 }
 
-/// Set the active problem ID before a run. Called by PyNSGAII.
-pub fn set_active_problem_id(id: u64) {
-    *active_problem_id().lock().unwrap() = id;
-}
-
-// ---------------------------------------------------------------------------
-// Batch-evaluation callable registry
-// ---------------------------------------------------------------------------
-
-fn batch_callable_registry() -> &'static Mutex<HashMap<u64, Py<PyAny>>> {
-    static INSTANCE: OnceLock<Mutex<HashMap<u64, Py<PyAny>>>> = OnceLock::new();
-    INSTANCE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn active_batch_problem_id() -> &'static Mutex<u64> {
-    static INSTANCE: OnceLock<Mutex<u64>> = OnceLock::new();
-    INSTANCE.get_or_init(|| Mutex::new(0))
-}
-
-/// Batch trampoline: calls `f(population: List[List[float]]) -> List[List[float]]`.
-/// The Python function can use multiprocessing / ProcessPoolExecutor internally.
 fn python_batch_objective_trampoline(inputs: &Vec<Vec<f64>>) -> Vec<Vec<f64>> {
-    let problem_id = *active_batch_problem_id().lock().unwrap();
-    let registry = batch_callable_registry().lock().unwrap();
-    let callable = registry
-        .get(&problem_id)
-        .expect("Python batch callable not found in registry — was the Problem dropped?");
-    Python::with_gil(|py| {
-        // Build List[List[float]]
-        let py_pop = pyo3::types::PyList::new(
-            py,
-            inputs.iter().map(|sol| pyo3::types::PyList::new(py, sol).unwrap()),
-        )
-        .unwrap();
-        let result = callable
-            .call1(py, (py_pop,))
-            .expect("Python batch objective function raised an exception");
-        result
-            .extract::<Vec<Vec<f64>>>(py)
-            .expect("Python batch objective function must return a list of list of floats")
+    TLS_BATCH_CALLABLE.with(|cell| {
+        let borrow = cell.borrow();
+        let callable = borrow.as_ref()
+            .expect("No active batch callable — was activate_batch_callable() called before run()?");
+        Python::with_gil(|py| {
+            let py_pop = pyo3::types::PyList::new(
+                py,
+                inputs.iter().map(|sol| pyo3::types::PyList::new(py, sol).unwrap()),
+            ).unwrap();
+            callable.call1(py, (py_pop,))
+                .expect("Python batch objective function raised an exception")
+                .extract::<Vec<Vec<f64>>>(py)
+                .expect("Python batch objective function must return a list of list of floats")
+        })
     })
 }
 
-pub fn set_active_batch_problem_id(id: u64) {
-    *active_batch_problem_id().lock().unwrap() = id;
+pub fn activate_callable(callable: Py<PyAny>) {
+    TLS_CALLABLE.with(|c| *c.borrow_mut() = Some(callable));
+}
+pub fn deactivate_callable() {
+    TLS_CALLABLE.with(|c| *c.borrow_mut() = None);
+}
+pub fn activate_batch_callable(callable: Py<PyAny>) {
+    TLS_BATCH_CALLABLE.with(|c| *c.borrow_mut() = Some(callable));
+}
+pub fn deactivate_batch_callable() {
+    TLS_BATCH_CALLABLE.with(|c| *c.borrow_mut() = None);
 }
 
 // ---------------------------------------------------------------------------
@@ -95,29 +66,11 @@ pub fn set_active_batch_problem_id(id: u64) {
 // ---------------------------------------------------------------------------
 
 pub struct ProblemStore {
-    pub problem: Problem,
-    pub problem_id: u64,
-    /// True if using a single-evaluation Python callable (trampoline).
-    pub uses_python_callable: bool,
-    /// True if using a batch Python callable (batch trampoline).
-    pub uses_batch_callable: bool,
-}
-
-impl Drop for ProblemStore {
-    fn drop(&mut self) {
-        if self.uses_python_callable {
-            callable_registry()
-                .lock()
-                .unwrap()
-                .remove(&self.problem_id);
-        }
-        if self.uses_batch_callable {
-            batch_callable_registry()
-                .lock()
-                .unwrap()
-                .remove(&self.problem_id);
-        }
-    }
+    pub problem: Arc<Problem>,
+    pub callable: Option<Py<PyAny>>,
+    pub batch_callable: Option<Py<PyAny>>,
+    #[cfg(feature = "gpu")]
+    pub gpu_evaluator: Option<std::sync::Arc<rustypus::gpu_evaluator::GpuEvaluator>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -170,35 +123,26 @@ impl PyProblem {
         batch_objective_function: Option<PyObject>,
     ) -> PyResult<Self> {
         let data_types: Vec<SolutionDataTypes> = parse_data_types(py, solution_data_types)?;
-        let problem_id = PROBLEM_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
         if let Some(batch_fn) = batch_objective_function {
-            // Batch mode: register the batch callable, use the batch trampoline.
-            // A no-op single-eval function is required by Problem::new but will never be called.
-            batch_callable_registry()
-                .lock()
-                .unwrap()
-                .insert(problem_id, batch_fn.into_pyobject(py).unwrap().into());
-
-            fn placeholder(_: &Vec<f64>) -> Vec<f64> { Vec::new() }
-
-            let mut problem = Problem::new(
+            // Batch mode: use EvalFn::Batch with the batch trampoline.
+            let problem = Arc::new(Problem {
                 solution_length,
                 number_of_objectives,
-                objective_constraints,
-                constraint_operands,
-                direction,
-                data_types,
-                placeholder,
-            );
-            problem.batch_objective_function = Some(python_batch_objective_trampoline);
+                objective_constraint: objective_constraints,
+                objective_constraint_operands: constraint_operands,
+                direction: direction.or_else(|| Some(vec![-1; number_of_objectives])),
+                solution_data_types: data_types,
+                eval_fn: EvalFn::Batch(python_batch_objective_trampoline),
+            });
 
             return Ok(PyProblem {
                 store: ProblemStore {
                     problem,
-                    problem_id,
-                    uses_python_callable: false,
-                    uses_batch_callable: true,
+                    callable: None,
+                    batch_callable: Some(batch_fn.into_pyobject(py).unwrap().into()),
+                    #[cfg(feature = "gpu")]
+                    gpu_evaluator: None,
                 },
             });
         }
@@ -209,12 +153,8 @@ impl PyProblem {
                 "Either objective_function or batch_objective_function must be provided",
             )
         })?;
-        callable_registry()
-            .lock()
-            .unwrap()
-            .insert(problem_id, obj_fn.into_pyobject(py).unwrap().into());
 
-        let problem = Problem::new(
+        let problem = Arc::new(Problem::new(
             solution_length,
             number_of_objectives,
             objective_constraints,
@@ -222,14 +162,15 @@ impl PyProblem {
             direction,
             data_types,
             python_objective_trampoline,
-        );
+        ));
 
         Ok(PyProblem {
             store: ProblemStore {
                 problem,
-                problem_id,
-                uses_python_callable: true,
-                uses_batch_callable: false,
+                callable: Some(obj_fn.into_pyobject(py).unwrap().into()),
+                batch_callable: None,
+                #[cfg(feature = "gpu")]
+                gpu_evaluator: None,
             },
         })
     }
@@ -263,10 +204,9 @@ pub fn create_problem_from_fn(
     objective_function: fn(&Vec<f64>) -> Vec<f64>,
     direction: Option<Vec<i8>>,
 ) -> PyProblem {
-    let problem_id = PROBLEM_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
     PyProblem {
         store: ProblemStore {
-            problem: Problem::new(
+            problem: Arc::new(Problem::new(
                 solution_length,
                 number_of_objectives,
                 None,
@@ -274,10 +214,11 @@ pub fn create_problem_from_fn(
                 direction,
                 data_types,
                 objective_function,
-            ),
-            problem_id,
-            uses_python_callable: false,
-            uses_batch_callable: false,
+            )),
+            callable: None,
+            batch_callable: None,
+            #[cfg(feature = "gpu")]
+            gpu_evaluator: None,
         },
     }
 }

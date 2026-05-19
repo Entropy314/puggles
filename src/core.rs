@@ -3,8 +3,16 @@
 use crate::constraints::ComparisonFunctions;
 
 use crate::gatypes::SolutionDataTypes;
+use std::sync::Arc;
 
-#[derive(Debug)]
+/// Evaluation function discriminant: single-solution or batch.
+#[derive(Clone, Debug)]
+pub enum EvalFn {
+    Single(fn(&Vec<f64>) -> Vec<f64>),
+    Batch(fn(&Vec<Vec<f64>>) -> Vec<Vec<f64>>),
+}
+
+#[derive(Debug, Clone)]
 pub struct Problem {
     pub solution_length: usize,
     pub number_of_objectives: usize,
@@ -12,11 +20,7 @@ pub struct Problem {
     pub objective_constraint_operands: Option<Vec<Option<String>>>, // Operands for Greater than or less than the objective constraint eg. ["<", ">"]
     pub direction: Option<Vec<i8>>, // Defaults vector to -1 with length of number_of_objectives eg. [-1, -1]
     pub solution_data_types: Vec<SolutionDataTypes>,     // solution type is a vector of the solution types eg. [BitBinary, Integer(lower_bound:Some(10), upper_bound:Some(20)), Real(lower_bound:Some(1.0), upper_bound:Some(20.0))]
-    pub objective_function: fn(solution: &Vec<f64>) -> Vec<f64>, // Objective function that takes the SolutionTypes vector values and returns a vector of f64 values
-    /// Optional batch evaluator. When set, the GA calls this once per generation with all
-    /// unevaluated solutions instead of calling `objective_function` one-by-one.
-    /// Enables Python-side parallelism via multiprocessing/ProcessPoolExecutor.
-    pub batch_objective_function: Option<fn(solutions: &Vec<Vec<f64>>) -> Vec<Vec<f64>>>,
+    pub eval_fn: EvalFn,
 }
 
 impl Problem {
@@ -62,8 +66,7 @@ impl Problem {
             objective_constraint_operands,
             direction,
             solution_data_types,
-            objective_function,
-            batch_objective_function: None,
+            eval_fn: EvalFn::Single(objective_function),
         }
     }
 
@@ -91,7 +94,7 @@ impl Problem {
                 }
             }
         }
-        
+
         &self.objective_constraint_operands
     }
 
@@ -103,8 +106,11 @@ impl Problem {
         &self.solution_data_types
     }
 
-    pub fn objective_function(&self) -> &fn(&Vec<f64>) -> Vec<f64> {
-        &self.objective_function
+    pub fn objective_function(&self) -> fn(&Vec<f64>) -> Vec<f64> {
+        match self.eval_fn {
+            EvalFn::Single(f) => f,
+            EvalFn::Batch(_) => panic!("objective_function() called on a batch-mode Problem"),
+        }
     }
 
     pub fn generate_solution(&self) -> Vec<f64> {
@@ -127,8 +133,8 @@ impl Problem {
 }
 
 #[derive(Debug, Clone)]
-pub struct Solution<'a> { 
-    pub problem: &'a Problem,
+pub struct Solution {
+    pub problem: Arc<Problem>,
     pub solution: Vec<f64>, // Derived from Problem.solution_data_types
     pub objective_fitness_values: Vec<f64>,
     pub constraint_values: Vec<f64>,
@@ -138,8 +144,8 @@ pub struct Solution<'a> {
 }
 
 
-impl<'a> Solution<'a> { 
-    pub fn new(problem: &'a Problem) -> Self {
+impl Solution {
+    pub fn new(problem: Arc<Problem>) -> Self {
         let solution = problem.generate_solution();
         // create vectore of length number_of_objectives
         let objective_fitness_values: Vec<f64> = Vec::with_capacity(*problem.number_of_objectives());
@@ -233,13 +239,17 @@ impl<'a> Solution<'a> {
     }
 
     pub fn evaluate(&mut self) {
-        let objective_fitness_values = (self.problem.objective_function)(&self.solution);
+        self.objective_fitness_values = match self.problem.eval_fn {
+            EvalFn::Single(f) => f(&self.solution),
+            EvalFn::Batch(_) => panic!(
+                "Solution::evaluate() called on a batch-mode Problem. \
+                 Use evaluate_population() instead."
+            ),
+        };
         self.evaluated = true;
-        self.objective_fitness_values = objective_fitness_values;
+        self.constraint_values = self.evaluate_constraints();
+        self.constraint_violation = self.calculate_constraint_violation();
         self.feasible = self.is_feasible();
-        // self.constraint_violation = self.calculate_constraint_violation();
-        // self.constraint_values = self.evaluate_constraints();
-
     }
 
 }
@@ -294,35 +304,13 @@ mod tests {
             solution_data_types,
             parabloid_5_loc,
         );
-        
+
 
         assert_eq!(*problem.solution_length(), 5);
         assert_eq!(*problem.number_of_objectives(), 1);
-        
+
 
     }
-
-    // #[test]
-    // #[should_panic(expected = "solution_length does not match solution_data_types length")]
-    // fn test_problem_initialization_mismatched_lengths() {
-    //     let solution_data_types = vec![
-    //         SolutionDataTypes::BitBinary(BitBinary::new()),
-    //         SolutionDataTypes::Integer(Integer::new(Some(10), Some(20))),
-    //         SolutionDataTypes::Real(Real::new(Some(10.0), Some(20.0))),
-    //         SolutionDataTypes::Integer(Integer::new(Some(10), Some(20))),
-    //         SolutionDataTypes::Real(Real::new(Some(10.0), Some(20.0))),
-    //     ];
-
-    //     Problem::new(
-    //         5,
-    //         1,
-    //         None,
-    //         None,
-    //         None,
-    //         solution_data_types,
-    //         parabloid_5_loc,
-    //     );
-    // }
 
     #[test]
     fn test_generate_solution() {
@@ -360,7 +348,7 @@ mod tests {
             SolutionDataTypes::Real(Real::new(Some(-10.0), Some(20.0))),
         ];
 
-        let problem = Problem::new(
+        let problem = Arc::new(Problem::new(
             5,
             1,
             None,
@@ -368,9 +356,9 @@ mod tests {
             None,
             solution_data_types,
             parabloid_5_loc,
-        );
+        ));
 
-        let mut solution = Solution::new(&problem);
+        let mut solution = Solution::new(Arc::clone(&problem));
         solution.evaluate();
 
         assert!(solution.evaluated);
@@ -387,7 +375,7 @@ mod tests {
             SolutionDataTypes::Real(Real::new(Some(-10.0), Some(20.0))),
         ];
 
-        let problem = Problem::new(
+        let problem = Arc::new(Problem::new(
             5,
             1,
             None,
@@ -395,9 +383,9 @@ mod tests {
             None,
             solution_data_types,
             parabloid_5_loc,
-        );
+        ));
 
-        let mut solution = Solution::new(&problem);
+        let mut solution = Solution::new(Arc::clone(&problem));
         solution.evaluate();
 
         assert!(solution.is_feasible());
@@ -405,15 +393,17 @@ mod tests {
 
     #[test]
     fn test_solution_constraint_violation() {
+        // parabloid_5_loc([1,2,3,4,5]) = 0  → satisfies < 15 → violation count 0
+        // parabloid_5_loc([10,10,10,10,10]) = 285 → violates < 15 → violation count 1
         let solution_data_types = vec![
-            SolutionDataTypes::BitBinary(BitBinary::new()),
-            SolutionDataTypes::Integer(Integer::new(Some(10), Some(20))),
-            SolutionDataTypes::Real(Real::new(Some(10.0), Some(20.0))),
-            SolutionDataTypes::Integer(Integer::new(Some(-100), Some(20))),
-            SolutionDataTypes::Real(Real::new(Some(-10.0), Some(20.0))),
+            SolutionDataTypes::Real(Real::new(Some(0.0), Some(20.0))),
+            SolutionDataTypes::Real(Real::new(Some(0.0), Some(20.0))),
+            SolutionDataTypes::Real(Real::new(Some(0.0), Some(20.0))),
+            SolutionDataTypes::Real(Real::new(Some(0.0), Some(20.0))),
+            SolutionDataTypes::Real(Real::new(Some(0.0), Some(20.0))),
         ];
 
-        let problem = Problem::new(
+        let problem = Arc::new(Problem::new(
             5,
             1,
             Some(vec![Some(15.0)]),
@@ -421,12 +411,20 @@ mod tests {
             None,
             solution_data_types,
             parabloid_5_loc,
-        );
+        ));
 
-        let mut solution = Solution::new(&problem);
-        solution.evaluate();
+        // Solution at the optimum — objective = 0, satisfies < 15
+        let mut feasible = Solution::new(Arc::clone(&problem));
+        feasible.solution = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        feasible.evaluate();
+        assert_eq!(feasible.constraint_violation, 0, "solution at optimum should have no violations");
 
-        assert_eq!(solution.calculate_constraint_violation(), 0);
+        // Solution far from optimum — objective = 285, violates < 15
+        let mut infeasible = Solution::new(Arc::clone(&problem));
+        infeasible.solution = vec![10.0, 10.0, 10.0, 10.0, 10.0];
+        infeasible.evaluate();
+        assert_eq!(infeasible.constraint_violation, 1, "solution with objective 285 should violate < 15");
+        assert!(!infeasible.feasible);
     }
 
 

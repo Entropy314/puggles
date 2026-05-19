@@ -1,13 +1,6 @@
 use crate::core::{Problem, Solution};
 
 
-#[derive(Debug)]
-pub enum DominanceEnum  {
-    ParetoDominance,
-    EpsilonDominance,
-    AttributeDominance
-}
-
 pub trait Dominance: Send + Sync {
     fn compare_solutions(&self, solution_1: &Solution, solution_2: &Solution) -> i32;
 }
@@ -69,6 +62,71 @@ impl Dominance for ParetoDominance {
         } else {
             1
         }
+    }
+}
+
+/// Epsilon-box dominance: solution A dominates B if A's objectives are within epsilon
+/// of Pareto dominance. Useful for reducing Pareto front size by grouping nearby solutions.
+pub struct EpsilonDominance {
+    pub epsilon: Vec<f64>,
+}
+
+impl Dominance for EpsilonDominance {
+    fn compare_solutions(&self, solution_1: &Solution, solution_2: &Solution) -> i32 {
+        let problem = &*solution_1.problem;
+        let n = *problem.number_of_objectives();
+
+        // Map each objective to its epsilon-box index
+        let box_1: Vec<i64> = (0..n).map(|i| {
+            let eps = if i < self.epsilon.len() { self.epsilon[i] } else { self.epsilon[self.epsilon.len()-1] };
+            (solution_1.objective_fitness_values[i] / eps).floor() as i64
+        }).collect();
+        let box_2: Vec<i64> = (0..n).map(|i| {
+            let eps = if i < self.epsilon.len() { self.epsilon[i] } else { self.epsilon[self.epsilon.len()-1] };
+            (solution_2.objective_fitness_values[i] / eps).floor() as i64
+        }).collect();
+
+        let dirs = problem.direction().as_ref().map(|d| d.as_slice());
+        let mut sol1_box_better = false;
+        let mut sol2_box_better = false;
+        for i in 0..n {
+            let minimize = dirs.map_or(true, |d| d[i] == -1);
+            let (b1, b2) = if minimize { (box_1[i], box_2[i]) } else { (-box_1[i], -box_2[i]) };
+            if b1 < b2 { sol1_box_better = true; }
+            else if b2 < b1 { sol2_box_better = true; }
+        }
+        match (sol1_box_better, sol2_box_better) {
+            (true, false) => -1,
+            (false, true) => 1,
+            _ => 0,
+        }
+    }
+}
+
+/// Attribute-based dominance: uses pre-computed fitness attributes (rank, crowding distance)
+/// rather than objective values. Solution with lower rank wins; ties broken by crowding distance.
+pub struct AttributeDominance;
+
+impl AttributeDominance {
+    /// Compare two solutions using rank and crowding distance.
+    /// Lower rank wins; equal rank → higher crowding distance wins.
+    pub fn compare_by_rank_and_crowd(
+        rank_1: usize, crowd_1: f64,
+        rank_2: usize, crowd_2: f64,
+    ) -> i32 {
+        if rank_1 < rank_2 { -1 }
+        else if rank_1 > rank_2 { 1 }
+        else if crowd_1 > crowd_2 { -1 }
+        else if crowd_1 < crowd_2 { 1 }
+        else { 0 }
+    }
+}
+
+impl Dominance for AttributeDominance {
+    fn compare_solutions(&self, solution_1: &Solution, solution_2: &Solution) -> i32 {
+        // Falls back to Pareto dominance when rank/crowding attributes are not available.
+        // In practice, use compare_by_rank_and_crowd() directly.
+        ParetoDominance.compare_solutions(solution_1, solution_2)
     }
 }
 
@@ -169,13 +227,14 @@ pub fn crowding_distance(population: &[Solution], front_indices: &[usize]) -> Ve
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{Problem, Solution};
-    use crate::gatypes::{SolutionDataTypes, Real, BitBinary, Integer};
-    use crate::benchmark_objective_functions::{parabloid_5, parabloid_hyper_5, simple_objective};
+    use std::sync::Arc;
+    use crate::core::{EvalFn, Problem, Solution};
+    use crate::gatypes::{SolutionDataTypes, Real};
+    use crate::benchmark_objective_functions::parabloid_5;
 
     #[test]
     fn test_pareto_dominance_sol1_dominates() {
-        let problem = Problem {
+        let problem = Arc::new(Problem {
             solution_length: 5,
             number_of_objectives: 1,
             objective_constraint: None,
@@ -188,12 +247,11 @@ mod tests {
                 SolutionDataTypes::Real(Real::new(Some(0.), Some(100.))),
                 SolutionDataTypes::Real(Real::new(Some(0.), Some(100.))),
             ],
-            objective_function: parabloid_5,
-            batch_objective_function: None,
-        };
+            eval_fn: EvalFn::Single(parabloid_5),
+        });
 
         let mut sol1 = Solution {
-            problem: &problem,
+            problem: Arc::clone(&problem),
             solution: vec![10.0, 10.0, 10.0, 10.0, 10.0],
             objective_fitness_values: vec![],
             constraint_values: vec![],
@@ -202,7 +260,7 @@ mod tests {
             evaluated: false,
         };
         let mut sol2 = Solution {
-            problem: &problem,
+            problem: Arc::clone(&problem),
             solution: vec![1.0, 1.0, 1.0, 1.0, 1.0],
             objective_fitness_values: vec![],
             constraint_values: vec![],
@@ -220,7 +278,7 @@ mod tests {
 
     #[test]
     fn test_pareto_dominance_sol2_dominates() {
-        let problem = Problem {
+        let problem = Arc::new(Problem {
             solution_length: 5,
             number_of_objectives: 1,
             objective_constraint: None,
@@ -233,12 +291,11 @@ mod tests {
                 SolutionDataTypes::Real(Real::new(Some(0.), Some(100.))),
                 SolutionDataTypes::Real(Real::new(Some(0.), Some(100.))),
             ],
-            objective_function: parabloid_5,
-            batch_objective_function: None,
-        };
+            eval_fn: EvalFn::Single(parabloid_5),
+        });
 
         let mut sol1 = Solution {
-            problem: &problem,
+            problem: Arc::clone(&problem),
             solution: vec![10.0, 10.0, 10.0, 10.0, 10.0],
             objective_fitness_values: vec![],
             constraint_values: vec![],
@@ -247,7 +304,7 @@ mod tests {
             evaluated: false,
         };
         let mut sol2 = Solution {
-            problem: &problem,
+            problem: Arc::clone(&problem),
             solution: vec![1.0, 1.0, 1.0, 1.0, 1.0],
             objective_fitness_values: vec![],
             constraint_values: vec![],
@@ -265,7 +322,7 @@ mod tests {
 
     #[test]
     fn test_pareto_dominance_non_dominated() {
-        let problem = Problem {
+        let problem = Arc::new(Problem {
             solution_length: 2,
             number_of_objectives: 2,
             objective_constraint: None,
@@ -275,13 +332,12 @@ mod tests {
                 SolutionDataTypes::Real(Real::new(Some(0.), Some(100.))),
                 SolutionDataTypes::Real(Real::new(Some(0.), Some(100.))),
             ],
-            objective_function: |x| vec![x[0], x[1]],
-            batch_objective_function: None,
-        };
+            eval_fn: EvalFn::Single(|x| vec![x[0], x[1]]),
+        });
 
         // sol1 is better on obj0, sol2 is better on obj1 => non-dominated
         let sol1 = Solution {
-            problem: &problem,
+            problem: Arc::clone(&problem),
             solution: vec![1.0, 10.0],
             objective_fitness_values: vec![1.0, 10.0],
             constraint_values: vec![],
@@ -290,7 +346,7 @@ mod tests {
             evaluated: true,
         };
         let sol2 = Solution {
-            problem: &problem,
+            problem: Arc::clone(&problem),
             solution: vec![10.0, 1.0],
             objective_fitness_values: vec![10.0, 1.0],
             constraint_values: vec![],
@@ -305,7 +361,7 @@ mod tests {
 
     #[test]
     fn test_fast_non_dominated_sort() {
-        let problem = Problem {
+        let problem = Arc::new(Problem {
             solution_length: 2,
             number_of_objectives: 2,
             objective_constraint: None,
@@ -315,20 +371,19 @@ mod tests {
                 SolutionDataTypes::Real(Real::new(Some(0.), Some(100.))),
                 SolutionDataTypes::Real(Real::new(Some(0.), Some(100.))),
             ],
-            objective_function: |x| vec![x[0], x[1]],
-            batch_objective_function: None,
-        };
+            eval_fn: EvalFn::Single(|x| vec![x[0], x[1]]),
+        });
 
         let population = vec![
             // Front 0: Pareto-optimal
-            Solution { problem: &problem, solution: vec![1.0, 5.0], objective_fitness_values: vec![1.0, 5.0], constraint_values: vec![], constraint_violation: 0, feasible: true, evaluated: true },
-            Solution { problem: &problem, solution: vec![5.0, 1.0], objective_fitness_values: vec![5.0, 1.0], constraint_values: vec![], constraint_violation: 0, feasible: true, evaluated: true },
+            Solution { problem: Arc::clone(&problem), solution: vec![1.0, 5.0], objective_fitness_values: vec![1.0, 5.0], constraint_values: vec![], constraint_violation: 0, feasible: true, evaluated: true },
+            Solution { problem: Arc::clone(&problem), solution: vec![5.0, 1.0], objective_fitness_values: vec![5.0, 1.0], constraint_values: vec![], constraint_violation: 0, feasible: true, evaluated: true },
             // Front 1: dominated by front 0
-            Solution { problem: &problem, solution: vec![3.0, 6.0], objective_fitness_values: vec![3.0, 6.0], constraint_values: vec![], constraint_violation: 0, feasible: true, evaluated: true },
+            Solution { problem: Arc::clone(&problem), solution: vec![3.0, 6.0], objective_fitness_values: vec![3.0, 6.0], constraint_values: vec![], constraint_violation: 0, feasible: true, evaluated: true },
             // Front 1: dominated by front 0
-            Solution { problem: &problem, solution: vec![6.0, 3.0], objective_fitness_values: vec![6.0, 3.0], constraint_values: vec![], constraint_violation: 0, feasible: true, evaluated: true },
+            Solution { problem: Arc::clone(&problem), solution: vec![6.0, 3.0], objective_fitness_values: vec![6.0, 3.0], constraint_values: vec![], constraint_violation: 0, feasible: true, evaluated: true },
             // Front 2: dominated by front 1
-            Solution { problem: &problem, solution: vec![10.0, 10.0], objective_fitness_values: vec![10.0, 10.0], constraint_values: vec![], constraint_violation: 0, feasible: true, evaluated: true },
+            Solution { problem: Arc::clone(&problem), solution: vec![10.0, 10.0], objective_fitness_values: vec![10.0, 10.0], constraint_values: vec![], constraint_violation: 0, feasible: true, evaluated: true },
         ];
 
         let fronts = fast_non_dominated_sort(&population, &ParetoDominance);
@@ -341,7 +396,7 @@ mod tests {
 
     #[test]
     fn test_crowding_distance_boundary() {
-        let problem = Problem {
+        let problem = Arc::new(Problem {
             solution_length: 2,
             number_of_objectives: 2,
             objective_constraint: None,
@@ -351,14 +406,13 @@ mod tests {
                 SolutionDataTypes::Real(Real::new(Some(0.), Some(100.))),
                 SolutionDataTypes::Real(Real::new(Some(0.), Some(100.))),
             ],
-            objective_function: |x| vec![x[0], x[1]],
-            batch_objective_function: None,
-        };
+            eval_fn: EvalFn::Single(|x| vec![x[0], x[1]]),
+        });
 
         let population = vec![
-            Solution { problem: &problem, solution: vec![1.0, 5.0], objective_fitness_values: vec![1.0, 5.0], constraint_values: vec![], constraint_violation: 0, feasible: true, evaluated: true },
-            Solution { problem: &problem, solution: vec![3.0, 3.0], objective_fitness_values: vec![3.0, 3.0], constraint_values: vec![], constraint_violation: 0, feasible: true, evaluated: true },
-            Solution { problem: &problem, solution: vec![5.0, 1.0], objective_fitness_values: vec![5.0, 1.0], constraint_values: vec![], constraint_violation: 0, feasible: true, evaluated: true },
+            Solution { problem: Arc::clone(&problem), solution: vec![1.0, 5.0], objective_fitness_values: vec![1.0, 5.0], constraint_values: vec![], constraint_violation: 0, feasible: true, evaluated: true },
+            Solution { problem: Arc::clone(&problem), solution: vec![3.0, 3.0], objective_fitness_values: vec![3.0, 3.0], constraint_values: vec![], constraint_violation: 0, feasible: true, evaluated: true },
+            Solution { problem: Arc::clone(&problem), solution: vec![5.0, 1.0], objective_fitness_values: vec![5.0, 1.0], constraint_values: vec![], constraint_violation: 0, feasible: true, evaluated: true },
         ];
 
         let front = vec![0, 1, 2];
@@ -370,5 +424,58 @@ mod tests {
         // middle solution should have finite distance
         assert!(distances[1].is_finite());
         assert!(distances[1] > 0.0);
+    }
+
+    #[test]
+    fn test_epsilon_dominance() {
+        let problem = Arc::new(Problem {
+            solution_length: 2,
+            number_of_objectives: 2,
+            objective_constraint: None,
+            objective_constraint_operands: None,
+            direction: Some(vec![-1, -1]),
+            solution_data_types: vec![
+                SolutionDataTypes::Real(Real::new(Some(0.), Some(100.))),
+                SolutionDataTypes::Real(Real::new(Some(0.), Some(100.))),
+            ],
+            eval_fn: EvalFn::Single(|x| vec![x[0], x[1]]),
+        });
+
+        let sol1 = Solution {
+            problem: Arc::clone(&problem),
+            solution: vec![1.0, 1.0],
+            objective_fitness_values: vec![1.0, 1.0],
+            constraint_values: vec![],
+            constraint_violation: 0,
+            feasible: true,
+            evaluated: true,
+        };
+        let sol2 = Solution {
+            problem: Arc::clone(&problem),
+            solution: vec![5.0, 5.0],
+            objective_fitness_values: vec![5.0, 5.0],
+            constraint_values: vec![],
+            constraint_violation: 0,
+            feasible: true,
+            evaluated: true,
+        };
+
+        let eps_dom = EpsilonDominance { epsilon: vec![1.0, 1.0] };
+        // sol1 has box indices [1,1], sol2 has box indices [5,5]
+        // sol1 dominates sol2 (minimizing)
+        let result = eps_dom.compare_solutions(&sol1, &sol2);
+        assert_eq!(result, -1);
+    }
+
+    #[test]
+    fn test_attribute_dominance_compare() {
+        // Lower rank wins
+        assert_eq!(AttributeDominance::compare_by_rank_and_crowd(0, 0.5, 1, 1.0), -1);
+        assert_eq!(AttributeDominance::compare_by_rank_and_crowd(1, 1.0, 0, 0.5), 1);
+        // Same rank, higher crowding wins
+        assert_eq!(AttributeDominance::compare_by_rank_and_crowd(0, 1.0, 0, 0.5), -1);
+        assert_eq!(AttributeDominance::compare_by_rank_and_crowd(0, 0.5, 0, 1.0), 1);
+        // Equal
+        assert_eq!(AttributeDominance::compare_by_rank_and_crowd(0, 0.5, 0, 0.5), 0);
     }
 }

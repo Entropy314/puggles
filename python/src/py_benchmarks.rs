@@ -92,10 +92,15 @@ pub fn create_benchmark_problem(
         ));
     }
 
+    fn dtlz4_default(x: &Vec<f64>) -> Vec<f64> {
+        benchmark_objective_functions::dtlz4(x, 100.0)
+    }
+
     let obj_fn: fn(&Vec<f64>) -> Vec<f64> = match name {
         "dtlz1" => benchmark_objective_functions::dtlz1,
         "dtlz2" => benchmark_objective_functions::dtlz2,
         "dtlz3" => benchmark_objective_functions::dtlz3,
+        "dtlz4" => dtlz4_default,
         "dtlz5" => benchmark_objective_functions::dtlz5,
         "dtlz6" => benchmark_objective_functions::dtlz6,
         "dtlz7" => benchmark_objective_functions::dtlz7,

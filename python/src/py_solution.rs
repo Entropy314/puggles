@@ -30,7 +30,7 @@ impl PySolution {
 }
 
 impl PySolution {
-    pub fn from_core_solution(sol: &Solution<'_>) -> Self {
+    pub fn from_core_solution(sol: &Solution) -> Self {
         PySolution {
             variables: sol.solution.clone(),
             objectives: sol.objective_fitness_values.clone(),
