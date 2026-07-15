@@ -12,7 +12,7 @@ impl Dominance for ParetoDominance {
     /// Returns -1 if solution_1 dominates, 1 if solution_2 dominates, 0 if non-dominated
     fn compare_solutions(&self, solution_1: &Solution, solution_2: &Solution) -> i32 {
         let problem: &Problem = &solution_1.problem;
-        let n_objectives = *problem.number_of_objectives();
+        let n_objectives = problem.number_of_objectives;
 
         // Constraint-based dominance: fewer violations wins
         if let Some(ref constraints) = &problem.objective_constraint {
@@ -34,7 +34,7 @@ impl Dominance for ParetoDominance {
             let mut obj_1 = solution_1.objective_fitness_values[i];
             let mut obj_2 = solution_2.objective_fitness_values[i];
 
-            if let Some(direction) = problem.direction() {
+            if let Some(direction) = &problem.direction {
                 // For minimization (direction == -1), negate so "lower is better" becomes "higher is better"
                 if direction[i] == -1 {
                     obj_1 = -obj_1;
@@ -62,71 +62,6 @@ impl Dominance for ParetoDominance {
         } else {
             1
         }
-    }
-}
-
-/// Epsilon-box dominance: solution A dominates B if A's objectives are within epsilon
-/// of Pareto dominance. Useful for reducing Pareto front size by grouping nearby solutions.
-pub struct EpsilonDominance {
-    pub epsilon: Vec<f64>,
-}
-
-impl Dominance for EpsilonDominance {
-    fn compare_solutions(&self, solution_1: &Solution, solution_2: &Solution) -> i32 {
-        let problem = &*solution_1.problem;
-        let n = *problem.number_of_objectives();
-
-        // Map each objective to its epsilon-box index
-        let box_1: Vec<i64> = (0..n).map(|i| {
-            let eps = if i < self.epsilon.len() { self.epsilon[i] } else { self.epsilon[self.epsilon.len()-1] };
-            (solution_1.objective_fitness_values[i] / eps).floor() as i64
-        }).collect();
-        let box_2: Vec<i64> = (0..n).map(|i| {
-            let eps = if i < self.epsilon.len() { self.epsilon[i] } else { self.epsilon[self.epsilon.len()-1] };
-            (solution_2.objective_fitness_values[i] / eps).floor() as i64
-        }).collect();
-
-        let dirs = problem.direction().as_ref().map(|d| d.as_slice());
-        let mut sol1_box_better = false;
-        let mut sol2_box_better = false;
-        for i in 0..n {
-            let minimize = dirs.map_or(true, |d| d[i] == -1);
-            let (b1, b2) = if minimize { (box_1[i], box_2[i]) } else { (-box_1[i], -box_2[i]) };
-            if b1 < b2 { sol1_box_better = true; }
-            else if b2 < b1 { sol2_box_better = true; }
-        }
-        match (sol1_box_better, sol2_box_better) {
-            (true, false) => -1,
-            (false, true) => 1,
-            _ => 0,
-        }
-    }
-}
-
-/// Attribute-based dominance: uses pre-computed fitness attributes (rank, crowding distance)
-/// rather than objective values. Solution with lower rank wins; ties broken by crowding distance.
-pub struct AttributeDominance;
-
-impl AttributeDominance {
-    /// Compare two solutions using rank and crowding distance.
-    /// Lower rank wins; equal rank → higher crowding distance wins.
-    pub fn compare_by_rank_and_crowd(
-        rank_1: usize, crowd_1: f64,
-        rank_2: usize, crowd_2: f64,
-    ) -> i32 {
-        if rank_1 < rank_2 { -1 }
-        else if rank_1 > rank_2 { 1 }
-        else if crowd_1 > crowd_2 { -1 }
-        else if crowd_1 < crowd_2 { 1 }
-        else { 0 }
-    }
-}
-
-impl Dominance for AttributeDominance {
-    fn compare_solutions(&self, solution_1: &Solution, solution_2: &Solution) -> i32 {
-        // Falls back to Pareto dominance when rank/crowding attributes are not available.
-        // In practice, use compare_by_rank_and_crowd() directly.
-        ParetoDominance.compare_solutions(solution_1, solution_2)
     }
 }
 
@@ -192,7 +127,7 @@ pub fn crowding_distance(population: &[Solution], front_indices: &[usize]) -> Ve
     }
 
     let mut distances = vec![0.0f64; n];
-    let n_objectives = *population[front_indices[0]].problem.number_of_objectives();
+    let n_objectives = population[front_indices[0]].problem.number_of_objectives;
 
     for m in 0..n_objectives {
         // Sort front by objective m
@@ -247,6 +182,7 @@ mod tests {
                 SolutionDataTypes::Real(Real::new(Some(0.), Some(100.))),
                 SolutionDataTypes::Real(Real::new(Some(0.), Some(100.))),
             ],
+            variable_constraints: None,
             eval_fn: EvalFn::Single(parabloid_5),
         });
 
@@ -291,6 +227,7 @@ mod tests {
                 SolutionDataTypes::Real(Real::new(Some(0.), Some(100.))),
                 SolutionDataTypes::Real(Real::new(Some(0.), Some(100.))),
             ],
+            variable_constraints: None,
             eval_fn: EvalFn::Single(parabloid_5),
         });
 
@@ -332,6 +269,7 @@ mod tests {
                 SolutionDataTypes::Real(Real::new(Some(0.), Some(100.))),
                 SolutionDataTypes::Real(Real::new(Some(0.), Some(100.))),
             ],
+            variable_constraints: None,
             eval_fn: EvalFn::Single(|x| vec![x[0], x[1]]),
         });
 
@@ -371,6 +309,7 @@ mod tests {
                 SolutionDataTypes::Real(Real::new(Some(0.), Some(100.))),
                 SolutionDataTypes::Real(Real::new(Some(0.), Some(100.))),
             ],
+            variable_constraints: None,
             eval_fn: EvalFn::Single(|x| vec![x[0], x[1]]),
         });
 
@@ -406,6 +345,7 @@ mod tests {
                 SolutionDataTypes::Real(Real::new(Some(0.), Some(100.))),
                 SolutionDataTypes::Real(Real::new(Some(0.), Some(100.))),
             ],
+            variable_constraints: None,
             eval_fn: EvalFn::Single(|x| vec![x[0], x[1]]),
         });
 
@@ -426,56 +366,4 @@ mod tests {
         assert!(distances[1] > 0.0);
     }
 
-    #[test]
-    fn test_epsilon_dominance() {
-        let problem = Arc::new(Problem {
-            solution_length: 2,
-            number_of_objectives: 2,
-            objective_constraint: None,
-            objective_constraint_operands: None,
-            direction: Some(vec![-1, -1]),
-            solution_data_types: vec![
-                SolutionDataTypes::Real(Real::new(Some(0.), Some(100.))),
-                SolutionDataTypes::Real(Real::new(Some(0.), Some(100.))),
-            ],
-            eval_fn: EvalFn::Single(|x| vec![x[0], x[1]]),
-        });
-
-        let sol1 = Solution {
-            problem: Arc::clone(&problem),
-            solution: vec![1.0, 1.0],
-            objective_fitness_values: vec![1.0, 1.0],
-            constraint_values: vec![],
-            constraint_violation: 0,
-            feasible: true,
-            evaluated: true,
-        };
-        let sol2 = Solution {
-            problem: Arc::clone(&problem),
-            solution: vec![5.0, 5.0],
-            objective_fitness_values: vec![5.0, 5.0],
-            constraint_values: vec![],
-            constraint_violation: 0,
-            feasible: true,
-            evaluated: true,
-        };
-
-        let eps_dom = EpsilonDominance { epsilon: vec![1.0, 1.0] };
-        // sol1 has box indices [1,1], sol2 has box indices [5,5]
-        // sol1 dominates sol2 (minimizing)
-        let result = eps_dom.compare_solutions(&sol1, &sol2);
-        assert_eq!(result, -1);
-    }
-
-    #[test]
-    fn test_attribute_dominance_compare() {
-        // Lower rank wins
-        assert_eq!(AttributeDominance::compare_by_rank_and_crowd(0, 0.5, 1, 1.0), -1);
-        assert_eq!(AttributeDominance::compare_by_rank_and_crowd(1, 1.0, 0, 0.5), 1);
-        // Same rank, higher crowding wins
-        assert_eq!(AttributeDominance::compare_by_rank_and_crowd(0, 1.0, 0, 0.5), -1);
-        assert_eq!(AttributeDominance::compare_by_rank_and_crowd(0, 0.5, 0, 1.0), 1);
-        // Equal
-        assert_eq!(AttributeDominance::compare_by_rank_and_crowd(0, 0.5, 0, 0.5), 0);
-    }
 }

@@ -1,233 +1,173 @@
 # rustypus
 
-A multi-objective evolutionary optimization library written in Rust with Python bindings. Implements NSGA-II (Non-dominated Sorting Genetic Algorithm II) for solving single- and multi-objective optimization problems over continuous, integer, and binary decision variables.
+A multi-objective evolutionary optimization library written in Rust. Implements NSGA-II (Non-dominated Sorting Genetic Algorithm II) for solving single- and multi-objective optimization problems over continuous, integer, and binary decision variables, with optional constraint handling, parallel (Rayon) evaluation, and optional GPU acceleration.
 
-> **Full documentation:** See [GUIDE.md](GUIDE.md) for a complete walkthrough with examples.
-
----
-
-## Installation
-
-```bash
-pip install maturin
-
-cd python
-PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin develop --release
-```
-
-> If your Python is 3.14+, the `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1` env var is required.
+> **Python bindings:** temporarily removed. They are being reimplemented in a later PR. This branch is Rust-only.
+>
+> **Full documentation:** see [GUIDE.md](GUIDE.md) for walkthroughs, the complete API, and configuration reference.
 
 ---
 
-## Quick Start
+## Add to your project
 
-```python
-import rustypus as rp
+Not published to crates.io yet — depend on it by path or git:
 
-def my_objective(x):
-    f1 = x[0]**2 + x[1]**2
-    f2 = (x[0] - 1)**2 + (x[1] - 1)**2
-    return [f1, f2]
-
-problem = rp.Problem(
-    solution_length=2,
-    number_of_objectives=2,
-    solution_data_types=[rp.Real(-5.0, 5.0), rp.Real(-5.0, 5.0)],
-    objective_function=my_objective,
-    direction=[-1, -1],   # -1 = minimize, 1 = maximize
-)
-
-ga = rp.NSGAII(problem, population_size=100)
-ga.run(10_000)
-
-for sol in ga.get_archive():
-    print(f"x={[round(v,3) for v in sol.variables]}  f={[round(f,3) for f in sol.objectives]}")
+```toml
+[dependencies]
+rustypus = { path = "path/to/rustypus" }
+# GPU evaluation is optional and off by default:
+# rustypus = { path = "path/to/rustypus", features = ["gpu"] }
 ```
 
 ---
 
-## Variable Types
+## Quick start
 
-```python
-rp.Real(-10.0, 10.0)   # continuous float in [-10, 10)
-rp.Integer(-100, 100)  # discrete integer in [-100, 100)
-rp.BitBinary()         # 0 or 1
+```rust
+use std::sync::Arc;
+use rustypus::core::Problem;
+use rustypus::gatypes::{Real, SolutionDataTypes};
+use rustypus::genetic_algorithms_v2::{ExecutionMode, NSGAII};
+
+// Objective: minimize two conflicting functions. Returns one value per objective.
+fn objectives(x: &Vec<f64>) -> Vec<f64> {
+    let f1 = x[0] * x[0] + x[1] * x[1];
+    let f2 = (x[0] - 1.0).powi(2) + (x[1] - 1.0).powi(2);
+    vec![f1, f2]
+}
+
+fn main() {
+    let problem = Arc::new(Problem::new(
+        2,                                  // solution_length (decision variables)
+        2,                                  // number_of_objectives
+        None,                               // objective constraints
+        None,                               // constraint operators
+        Some(vec![-1, -1]),                 // direction: -1 = minimize, 1 = maximize
+        vec![
+            SolutionDataTypes::Real(Real::new(Some(-5.0), Some(5.0))),
+            SolutionDataTypes::Real(Real::new(Some(-5.0), Some(5.0))),
+        ],
+        objectives,
+    ));
+
+    let mut ga = NSGAII::new(Arc::clone(&problem), 100, ExecutionMode::MultiThreaded);
+    ga.run(10_000); // budget in objective-function evaluations (NFE); auto-initializes
+
+    for sol in ga.get_archive() {
+        println!("x = {:?}  f = {:?}", sol.solution, sol.objective_fitness_values);
+    }
+}
 ```
 
-Mix them freely within a single problem — operators adapt automatically per type.
+`get_archive()` returns the non-dominated (Pareto-optimal) set. On a `Solution`, decision variables are `sol.solution` and objective values are `sol.objective_fitness_values`.
+
+---
+
+## Variable types
+
+```rust
+use rustypus::gatypes::{Real, Integer, BitBinary, SolutionDataTypes};
+
+SolutionDataTypes::Real(Real::new(Some(-10.0), Some(10.0)))  // continuous float in [-10, 10)
+SolutionDataTypes::Integer(Integer::new(Some(-100), Some(100))) // integer in [-100, 100)
+SolutionDataTypes::BitBinary(BitBinary::new())               // 0 or 1
+```
+
+Mix them freely within one problem — crossover and mutation adapt per variable type. Defaults: `Real` → SBX crossover + uniform mutation; `Integer` → uniform crossover + uniform mutation; `BitBinary` → uniform crossover + bit-flip mutation.
 
 ---
 
 ## Constraints
 
-```python
-problem = rp.Problem(
-    solution_length=2,
-    number_of_objectives=1,
-    solution_data_types=[rp.Real(0.0, 10.0), rp.Real(0.0, 10.0)],
-    objective_function=my_objective,
-    objective_constraints=[50.0, None],      # bound per objective (None = unconstrained)
-    constraint_operands=["<", None],         # operator: "<", ">", "<=", ">=", "==", "!="
-)
+Constraints are bounds on the objective values after evaluation: `objective[i] <op> bound`, where `<op>` is one of `<`, `>`, `<=`, `>=`, `==`, `!=`. Pass one entry per objective (`None` = unconstrained).
+
+```rust
+let problem = Arc::new(Problem::new(
+    2,
+    1,
+    Some(vec![Some(1.0)]),               // bound per objective
+    Some(vec![Some("<".to_string())]),   // objective[0] must be < 1.0
+    Some(vec![-1]),
+    vec![
+        SolutionDataTypes::Real(Real::new(Some(-5.0), Some(5.0))),
+        SolutionDataTypes::Real(Real::new(Some(-5.0), Some(5.0))),
+    ],
+    sphere,
+));
 ```
 
-Feasible solutions dominate infeasible ones; among infeasible solutions, fewer violations wins.
+NSGA-II uses constraint-based dominance: a feasible solution dominates any infeasible one, and among infeasible solutions the one with fewer violations wins. `sol.constraint_violation` counts how many constraints a solution breaks; `sol.feasible` is `true` when none are broken.
 
 ---
 
-## Execution Modes
+## Execution modes
 
-| Mode | Use when |
+Pass an [`ExecutionMode`](src/genetic_algorithms_v2.rs) to `NSGAII::new`:
+
+| Mode | What runs |
 | --- | --- |
-| `"sequential"` | Python callable objective (default; GIL prevents true parallelism) |
-| `"multithreaded"` | Rust/benchmark objective — real CPU parallelism via Rayon |
-| `"gpu"` | GPU-compiled WGSL shader objective |
+| `Sequential` | Single-threaded CPU |
+| `MultiThreaded` | All CPU cores via Rayon (**default**) |
+| `GPU` | GPU via a wgpu compute shader — see below |
 
-When a Python `objective_function` is detected, the mode automatically falls back to `"sequential"` to prevent GIL deadlocks.
+Because `GPU` can silently fall back to CPU (feature off, or no evaluator attached) and a batch objective bypasses per-solution parallelism, ask the optimizer what it will *actually* do:
 
-```python
-# True parallelism with a built-in Rust benchmark
-problem = rp.create_benchmark_problem(
-    name="dtlz2",
-    solution_length=10,
-    number_of_objectives=3,
-    bounds=[(0.0, 1.0)] * 10,
-)
-ga = rp.NSGAII(problem, population_size=200, execution_mode="multithreaded", num_threads=8)
-ga.run(50_000)
+```rust
+let ga = NSGAII::new(problem, 100, ExecutionMode::GPU);
+assert_eq!(ga.effective_mode(), ExecutionMode::MultiThreaded); // no GPU evaluator attached → CPU
 ```
 
 ---
 
-## Batch Evaluation (Python parallelism)
+## GPU acceleration (optional)
 
-Use `batch_objective_function` to evaluate the whole generation at once. Plug in any Python parallel framework inside the batch call:
+Build with `--features gpu` and attach a `GpuEvaluator` backed by a WGSL compute shader (see the shader interface documented at the top of [src/gpu_evaluator.rs](src/gpu_evaluator.rs)):
 
-```python
-from concurrent.futures import ProcessPoolExecutor
+```rust
+# // requires: features = ["gpu"]
+use rustypus::gpu_evaluator::GpuEvaluator;
 
-def evaluate_one(x):
-    return [sum(xi**2 for xi in x)]
+let evaluator = GpuEvaluator::new_blocking(shader_wgsl, solution_length, num_objectives);
+let mut ga = NSGAII::new(problem, 200, ExecutionMode::GPU)
+    .with_gpu_evaluator(evaluator);
+ga.run(50_000);
+```
 
-def batch_evaluate(population):
-    with ProcessPoolExecutor() as pool:
-        return list(pool.map(evaluate_one, population))
+On construction the evaluator prints the selected adapter to stderr (`rustypus: GPU = ...`), so you can confirm a real device is in use. GPU applies only to single-objective-function problems (`EvalFn::Single`); batch problems always run their batch closure on the CPU.
 
-problem = rp.Problem(
-    solution_length=5,
-    number_of_objectives=1,
-    solution_data_types=[rp.Real(-5.0, 5.0)] * 5,
-    batch_objective_function=batch_evaluate,
-)
-ga = rp.NSGAII(problem, population_size=50)
-ga.run(5_000)
+---
+
+## Built-in benchmark objectives
+
+[`benchmark_objective_functions`](src/benchmark_objective_functions.rs) ships standard test functions usable directly as objectives: `parabloid_5`, `parabloid_5_loc`, `parabloid_hyper_5`, `simple_objective`, `xyz_objective`, and `dtlz1`–`dtlz7` (note `dtlz4` takes an extra `alpha` argument, so wrap it in a closure to use as an objective).
+
+```rust
+use rustypus::benchmark_objective_functions::dtlz2;
+let problem = Arc::new(Problem::new(12, 3, None, None, Some(vec![-1; 3]),
+    types, dtlz2));
 ```
 
 ---
 
-## Custom Operators
+## Runnable examples
 
-```python
-crossover = rp.CrossoverConfig(
-    real_crossover="de",      # "sbx" | "de" | "blend" | "pcx" | "undx"
-    de_probability=0.9,
-    de_scaling_factor=0.8,
-)
+The [`sandbox/`](sandbox/) workspace has complete, runnable examples:
 
-mutation = rp.MutationConfig(
-    real_mutation="polynomial",   # "uniform" | "polynomial" | "gaussian"
-    probability=0.05,
-    polynomial_distribution_index=20.0,
-)
-
-ga = rp.NSGAII(problem, crossover_config=crossover, mutation_config=mutation)
+```bash
+cd sandbox
+cargo run --release --example generic_opt     # ZDT1 bi-objective
+cargo run --release --example portfolio_opt
+cargo run --release --example supply_chain
+cargo run --release --example bench_zdt1
 ```
 
 ---
 
-## Callbacks
+## Testing
 
-Inspect progress after every generation or stop early:
-
-```python
-def on_iteration(archive, population, nfe):
-    print(f"nfe={nfe}  archive_size={len(archive)}")
-    if nfe >= 20_000:
-        return False   # stop early
-
-ga.run(100_000, callback=on_iteration)
+```bash
+cargo test                 # core library (CPU paths)
+cargo test --features gpu  # also compiles/exercises the GPU-gated code
 ```
 
----
-
-## Results
-
-```python
-ga.run(10_000)
-
-archive    = ga.get_archive()     # Pareto-optimal solutions
-population = ga.get_population()  # final generation
-nfe        = ga.nfe               # total evaluations used
-
-sol = archive[0]
-sol.variables           # list[float] — decision variables
-sol.objectives          # list[float] — objective values
-sol.feasible            # bool
-sol.constraint_violation  # int — number of violated constraints
-```
-
----
-
-## Built-in Benchmarks
-
-Available: `"dtlz1"` – `"dtlz7"`, `"paraboloid_5"`, `"paraboloid_5_loc"`, `"paraboloid_hyper_5"`, `"simple_objective"`, `"xyz_objective"`.
-
-```python
-problem = rp.create_benchmark_problem(
-    name="dtlz2",
-    solution_length=10,
-    number_of_objectives=3,
-    bounds=[(0.0, 1.0)] * 10,
-)
-```
-
-Call them directly too:
-
-```python
-rp.dtlz2([0.5] * 10)   # -> list[float]
-```
-
----
-
-## Full Example: Beam Design
-
-```python
-import rustypus as rp
-
-def beam_design(x):
-    width, height = x[0], x[1]
-    weight     = width * height
-    deflection = 1000.0 / (width * height**3)
-    return [weight, deflection]
-
-problem = rp.Problem(
-    solution_length=2,
-    number_of_objectives=2,
-    solution_data_types=[rp.Real(1.0, 50.0), rp.Real(1.0, 100.0)],
-    objective_function=beam_design,
-    direction=[-1, -1],
-)
-
-ga = rp.NSGAII(problem, population_size=100)
-ga.run(10_000)
-
-print("Pareto front (weight vs deflection):")
-for sol in sorted(ga.get_archive(), key=lambda s: s.objectives[0]):
-    w, d = sol.objectives
-    print(f"  w={sol.variables[0]:.1f}  h={sol.variables[1]:.1f}  "
-          f"-> weight={w:.2f}  deflection={d:.6f}")
-```
-
----
-
-See [GUIDE.md](GUIDE.md) for the complete API reference, Rust usage, dominance strategies, and advanced configuration.
+See [GUIDE.md](GUIDE.md) for the full API reference, custom operators, dominance/sorting internals, and tuning tips.

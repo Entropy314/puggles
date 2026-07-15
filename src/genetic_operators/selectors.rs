@@ -1,86 +1,19 @@
-use crate::dominance::{ParetoDominance, Dominance};
-use crate::core::Solution;
 use rand::{Rng, SeedableRng};
-use rand::rngs::StdRng;
-
-pub trait Selector: Send + Sync {
-    fn select_index(&mut self, population: &[Solution], n: usize) -> Vec<usize>;
-}
-
-#[derive(Debug)]
-pub struct TournamentSelector {
-    tournament_size: usize,
-    dominance: ParetoDominance,
-    rng: StdRng,
-}
-
-impl TournamentSelector {
-    pub fn new(tournament_size: usize, dominance: ParetoDominance, seed: Option<u64>) -> Self {
-        let rng = match seed {
-            Some(seed_value) => StdRng::seed_from_u64(seed_value),
-            None => StdRng::from_entropy(),
-        };
-        TournamentSelector { tournament_size, dominance, rng }
-    }
-
-    pub fn select_one<'a>(&mut self, population: &[&'a Solution]) -> &'a Solution {
-        let mut winner_idx = self.rng.gen_range(0..population.len());
-        for _ in 0..self.tournament_size {
-            let challenger_idx = self.rng.gen_range(0..population.len());
-            let flag = self.dominance.compare_solutions(population[challenger_idx], population[winner_idx]);
-            if flag < 0 {
-                winner_idx = challenger_idx;
-            }
-        }
-        population[winner_idx]
-    }
-
-    pub fn select<'a>(&mut self, n: usize, population: &[&'a Solution]) -> Vec<&'a Solution> {
-        let mut results = Vec::with_capacity(n);
-        for _ in 0..n {
-            results.push(self.select_one(population));
-        }
-        results
-    }
-}
-
-impl Selector for TournamentSelector {
-    fn select_index(&mut self, population: &[Solution], n: usize) -> Vec<usize> {
-        let mut results = Vec::with_capacity(n);
-        for _ in 0..n {
-            let mut winner_idx = self.rng.gen_range(0..population.len());
-            for _ in 0..self.tournament_size {
-                let challenger_idx = self.rng.gen_range(0..population.len());
-                let flag = self.dominance.compare_solutions(&population[challenger_idx], &population[winner_idx]);
-                if flag < 0 {
-                    winner_idx = challenger_idx;
-                }
-            }
-            results.push(winner_idx);
-        }
-        results
-    }
-}
-
-impl Default for TournamentSelector {
-    fn default() -> Self {
-        TournamentSelector::new(2, ParetoDominance, Some(1234))
-    }
-}
+use rand::rngs::SmallRng;
 
 /// Tournament selector that uses rank and crowding distance (NSGA-II style).
 /// Prefers lower rank; ties broken by higher crowding distance.
 #[derive(Debug)]
 pub struct CrowdingTournamentSelector {
     tournament_size: usize,
-    rng: StdRng,
+    rng: SmallRng,
 }
 
 impl CrowdingTournamentSelector {
     pub fn new(tournament_size: usize, seed: Option<u64>) -> Self {
         let rng = match seed {
-            Some(s) => StdRng::seed_from_u64(s),
-            None => StdRng::from_entropy(),
+            Some(s) => SmallRng::seed_from_u64(s),
+            None => SmallRng::from_entropy(),
         };
         CrowdingTournamentSelector { tournament_size, rng }
     }
@@ -121,114 +54,6 @@ pub fn crowding_compare(rank_a: usize, crowd_a: f64, rank_b: usize, crowd_b: f64
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use crate::core::{EvalFn, Solution, Problem};
-    use crate::gatypes::{SolutionDataTypes, BitBinary, Integer, Real};
-    use crate::benchmark_objective_functions::{parabloid_5_loc, parabloid_hyper_5};
-
-    fn setup_problem(objective_function: fn(&Vec<f64>) -> Vec<f64>, direction: Vec<i8>) -> Problem {
-        Problem {
-            solution_length: 5,
-            number_of_objectives: 1,
-            objective_constraint: Some(vec![Some(10.0)]),
-            objective_constraint_operands: Some(vec![Some("<".to_string())]),
-            direction: Some(direction),
-            solution_data_types: vec![
-                SolutionDataTypes::BitBinary(BitBinary::new()),
-                SolutionDataTypes::Integer(Integer::new(Some(10), Some(20))),
-                SolutionDataTypes::Real(Real::new(Some(10.0), Some(20.0))),
-                SolutionDataTypes::Integer(Integer::new(Some(-100), Some(20))),
-                SolutionDataTypes::Real(Real::new(Some(-10.0), Some(20.0))),
-            ],
-            eval_fn: EvalFn::Single(objective_function),
-        }
-    }
-
-    fn setup_solutions(problem: Arc<Problem>) -> Vec<Solution> {
-        vec![
-            Solution {
-                problem: Arc::clone(&problem),
-                solution: vec![1.0, 2.0, -3.0, 4.0, 5.0],
-                objective_fitness_values: Vec::new(),
-                constraint_values: Vec::new(),
-                constraint_violation: 0,
-                feasible: false,
-                evaluated: false,
-            },
-            Solution {
-                problem: Arc::clone(&problem),
-                solution: vec![12.0, 10.0, -3.0, 4.0, 5.0],
-                objective_fitness_values: Vec::new(),
-                constraint_values: Vec::new(),
-                constraint_violation: 0,
-                feasible: false,
-                evaluated: false,
-            },
-            Solution {
-                problem: Arc::clone(&problem),
-                solution: vec![-22.0, 12.0, -3.0, 1.0, 5.0],
-                objective_fitness_values: Vec::new(),
-                constraint_values: Vec::new(),
-                constraint_violation: 0,
-                feasible: false,
-                evaluated: false,
-            },
-            Solution {
-                problem: Arc::clone(&problem),
-                solution: vec![1.0, 2.0, 3.0, 4.0, 5.0],
-                objective_fitness_values: Vec::new(),
-                constraint_values: Vec::new(),
-                constraint_violation: 0,
-                feasible: false,
-                evaluated: false,
-            },
-        ]
-    }
-
-    fn evaluate_solutions(solutions: &mut Vec<Solution>) {
-        for solution in solutions.iter_mut() {
-            solution.evaluate();
-        }
-    }
-
-    #[test]
-    fn test_tournament_selector_single_objective_maximize() {
-        let problem = Arc::new(setup_problem(parabloid_5_loc, vec![1]));
-        let mut solutions = setup_solutions(Arc::clone(&problem));
-        evaluate_solutions(&mut solutions);
-
-        let population: Vec<&Solution> = solutions.iter().collect();
-        let mut tournament_selector = TournamentSelector::default();
-        let winner = tournament_selector.select_one(&population);
-
-        println!("Winner: {:?}", winner);
-    }
-
-    #[test]
-    fn test_tournament_selector_single_objective_minimize() {
-        let problem = Arc::new(setup_problem(parabloid_5_loc, vec![-1]));
-        let mut solutions = setup_solutions(Arc::clone(&problem));
-        evaluate_solutions(&mut solutions);
-
-        let population: Vec<&Solution> = solutions.iter().collect();
-        let mut tournament_selector = TournamentSelector::default();
-        let winner = tournament_selector.select_one(&population);
-
-        println!("Winner: {:?}", winner);
-    }
-
-    #[test]
-    fn test_selection_function() {
-        let problem = Arc::new(setup_problem(parabloid_hyper_5, vec![-1, -1, -1, -1, -1]));
-        let mut solutions = setup_solutions(Arc::clone(&problem));
-        evaluate_solutions(&mut solutions);
-
-        let population: Vec<&Solution> = solutions.iter().collect();
-        let mut tournament_selector = TournamentSelector::default();
-        let winners = tournament_selector.select(2, &population);
-
-        println!("Winners: {:?}", winners);
-    }
 
     #[test]
     fn test_crowding_tournament_selector() {

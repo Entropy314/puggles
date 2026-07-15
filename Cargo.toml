@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "python"]
+members = ["."]
 
 [package]
 name = "rustypus"
@@ -10,8 +10,12 @@ edition = "2021"
 gpu = ["dep:wgpu", "dep:pollster"]
 
 [dependencies]
-rand = "0.8.5"
-rand_distr = "0.4.3"
+rand = { version = "0.8.5", features = ["small_rng"] }
 rayon = "1.10.0"
+serde = { version = "1", features = ["derive"] }
 wgpu = { version = "22", optional = true }
 pollster = { version = "0.3", optional = true }
+
+[profile.release]
+lto = true
+codegen-units = 1

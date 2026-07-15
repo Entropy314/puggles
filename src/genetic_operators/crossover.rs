@@ -1,19 +1,11 @@
 use crate::core::Solution;
 use crate::gatypes::SolutionDataTypes;
-use crate::math_utils::clip;
 use rand::Rng;
-use std::collections::HashMap;
+use rand::rngs::SmallRng;
 
-/// Trait for crossover operations
+/// Trait for crossover operations. `rng` is threaded through so a seeded run is reproducible.
 pub trait Crossover {
-    fn crossover(&self, parent1: &Solution, parent2: &Solution) -> (Solution, Solution);
-
-    fn evolve(&self, parents: &[Solution]) -> Vec<Solution> {
-        parents.chunks_exact(2).flat_map(|pair| {
-            let (child1, child2) = self.crossover(&pair[0], &pair[1]);
-            vec![child1, child2]
-        }).collect()
-    }
+    fn crossover(&self, parent1: &Solution, parent2: &Solution, rng: &mut SmallRng) -> (Solution, Solution);
 }
 
 /// Simulated Binary Crossover (SBX) operator
@@ -30,8 +22,7 @@ impl SimulatedBinaryCrossover {
         }
     }
 
-    fn sbx_crossover(&self, x1: f64, x2: f64, lower: f64, upper: f64) -> (f64, f64) {
-        let mut rng = rand::thread_rng();
+    fn sbx_crossover(&self, x1: f64, x2: f64, lower: f64, upper: f64, rng: &mut SmallRng) -> (f64, f64) {
         if (x2 - x1).abs() > f64::EPSILON {
             let y1 = x1.min(x2);
             let y2 = x1.max(x2);
@@ -53,7 +44,7 @@ impl SimulatedBinaryCrossover {
                 std::mem::swap(&mut c1, &mut c2);
             }
 
-            (clip(c1, lower, upper), clip(c2, lower, upper))
+            (c1.clamp(lower, upper), c2.clamp(lower, upper))
         } else {
             (x1, x2)
         }
@@ -61,17 +52,17 @@ impl SimulatedBinaryCrossover {
 }
 
 impl Crossover for SimulatedBinaryCrossover {
-    fn crossover(&self, parent1: &Solution, parent2: &Solution) -> (Solution, Solution) {
+    fn crossover(&self, parent1: &Solution, parent2: &Solution, rng: &mut SmallRng) -> (Solution, Solution) {
         let mut child1 = parent1.clone();
         let mut child2 = parent2.clone();
         for (i, solution_type) in parent1.problem.solution_data_types.iter().enumerate() {
-            let random_number: f64 = rand::thread_rng().gen();
+            let random_number: f64 = rng.gen();
             match solution_type {
                 SolutionDataTypes::Real(real) => {
                     if random_number < self.probability {
                         let lower_bound = real.lower_bound.unwrap_or(f64::MIN);
                         let upper_bound = real.upper_bound.unwrap_or(f64::MAX);
-                        let (c1, c2) = self.sbx_crossover(child1.solution[i], child2.solution[i], lower_bound, upper_bound);
+                        let (c1, c2) = self.sbx_crossover(child1.solution[i], child2.solution[i], lower_bound, upper_bound, rng);
                         child1.solution[i] = c1;
                         child2.solution[i] = c2;
                         }
@@ -104,20 +95,20 @@ impl DifferentialEvolutionCrossover {
 }
 
 impl Crossover for DifferentialEvolutionCrossover {
-    fn crossover(&self, parent1: &Solution, parent2: &Solution) -> (Solution, Solution) {
+    fn crossover(&self, parent1: &Solution, parent2: &Solution, rng: &mut SmallRng) -> (Solution, Solution) {
         let mut child1 = parent1.clone();
         let mut child2 = parent2.clone();
 
         for (i, solution_type) in parent1.problem.solution_data_types.iter().enumerate() {
             if let SolutionDataTypes::Real(real) = solution_type {
-                if rand::thread_rng().gen::<f64>() < self.probability {
+                if rng.gen::<f64>() < self.probability {
                     let lower = real.lower_bound.unwrap_or(f64::MIN);
                     let upper = real.upper_bound.unwrap_or(f64::MAX);
                     let mut c1 = parent1.solution[i] + self.scaling_factor * (parent2.solution[i] - parent1.solution[i]);
                     let mut c2 = parent2.solution[i] + self.scaling_factor * (parent1.solution[i] - parent2.solution[i]);
 
-                    c1 = clip(c1, lower, upper);
-                    c2 = clip(c2, lower, upper);
+                    c1 = c1.clamp(lower, upper);
+                    c2 = c2.clamp(lower, upper);
 
                     child1.solution[i] = c1;
                     child2.solution[i] = c2;
@@ -143,7 +134,7 @@ pub struct ParentCentricCrossover {
 }
 
 impl Crossover for ParentCentricCrossover {
-    fn crossover(&self, parent1: &Solution, parent2: &Solution) -> (Solution, Solution) {
+    fn crossover(&self, parent1: &Solution, parent2: &Solution, _rng: &mut SmallRng) -> (Solution, Solution) {
         let mut child1 = parent1.clone();
         let mut child2 = parent2.clone();
 
@@ -160,8 +151,8 @@ impl Crossover for ParentCentricCrossover {
                     let mut c1 = parent1.solution[i] + self.eta * (avg - parent1.solution[i]);
                     let mut c2 = parent2.solution[i] + self.eta * (avg - parent2.solution[i]);
 
-                    c1 = clip(c1, lower, upper);
-                    c2 = clip(c2, lower, upper);
+                    c1 = c1.clamp(lower, upper);
+                    c2 = c2.clamp(lower, upper);
 
                     child1.solution[i] = c1;
                     child2.solution[i] = c2;
@@ -177,8 +168,8 @@ impl Crossover for ParentCentricCrossover {
                     let mut c1 = parent1.solution[i] + self.eta * (avg - parent1.solution[i]);
                     let mut c2 = parent2.solution[i] + self.eta * (avg - parent2.solution[i]);
 
-                    c1 = clip(c1.round(), lower, upper);
-                    c2 = clip(c2.round(), lower, upper);
+                    c1 = c1.round().clamp(lower, upper);
+                    c2 = c2.round().clamp(lower, upper);
 
                     child1.solution[i] = c1;
                     child2.solution[i] = c2;
@@ -207,7 +198,7 @@ pub struct UnimodalDistributionCrossover {
 }
 
 impl Crossover for UnimodalDistributionCrossover {
-    fn crossover(&self, parent1: &Solution, parent2: &Solution) -> (Solution, Solution) {
+    fn crossover(&self, parent1: &Solution, parent2: &Solution, _rng: &mut SmallRng) -> (Solution, Solution) {
         let mut child1 = parent1.clone();
         let mut child2 = parent2.clone();
         for (i, solution_type) in parent1.problem.solution_data_types.iter().enumerate() {
@@ -222,8 +213,8 @@ impl Crossover for UnimodalDistributionCrossover {
                 let mut c1 = parent1.solution[i] + self.eta * (avg - parent1.solution[i]);
                 let mut c2 = parent2.solution[i] + self.eta * (avg - parent2.solution[i]);
 
-                c1 = clip(c1, lower, upper);
-                c2 = clip(c2, lower, upper);
+                c1 = c1.clamp(lower, upper);
+                c2 = c2.clamp(lower, upper);
 
                 child1.solution[i] = c1;
                 child2.solution[i] = c2;
@@ -245,7 +236,7 @@ pub struct BlendCrossover {
 }
 
 impl Crossover for BlendCrossover {
-    fn crossover(&self, parent1: &Solution, parent2: &Solution) -> (Solution, Solution) {
+    fn crossover(&self, parent1: &Solution, parent2: &Solution, _rng: &mut SmallRng) -> (Solution, Solution) {
         let mut child1 = parent1.clone();
         let mut child2 = parent2.clone();
         for (i, solution_type) in parent1.problem.solution_data_types.iter().enumerate() {
@@ -255,8 +246,8 @@ impl Crossover for BlendCrossover {
                 let mut c1 = 0.5 * (1.0 + self.alpha) * parent1.solution[i] + 0.5 * (1.0 - self.alpha) * parent2.solution[i];
                 let mut c2 = 0.5 * (1.0 + self.alpha) * parent2.solution[i] + 0.5 * (1.0 - self.alpha) * parent1.solution[i];
 
-                c1 = clip(c1, lower, upper);
-                c2 = clip(c2, lower, upper);
+                c1 = c1.clamp(lower, upper);
+                c2 = c2.clamp(lower, upper);
 
                 child1.solution[i] = c1;
                 child2.solution[i] = c2;
@@ -277,7 +268,7 @@ pub struct UniformCrossover {
 }
 
 impl Crossover for UniformCrossover {
-    fn crossover(&self, parent1: &Solution, parent2: &Solution) -> (Solution, Solution) {
+    fn crossover(&self, parent1: &Solution, parent2: &Solution, rng: &mut SmallRng) -> (Solution, Solution) {
         let mut child1 = parent1.clone();
         let mut child2 = parent2.clone();
 
@@ -287,7 +278,7 @@ impl Crossover for UniformCrossover {
                     let lower = integer.lower_bound.unwrap_or(i64::MIN);
                     let upper = integer.upper_bound.unwrap_or(i64::MAX);
                     for j in 0..32 {
-                        if rand::thread_rng().gen::<f64>() < self.probability {
+                        if rng.gen::<f64>() < self.probability {
                             let mask = 1 << j;
                             let c1 = (parent1.solution[i] as i64 & mask) | (parent2.solution[i] as i64 & !mask);
                             let c2 = (parent2.solution[i] as i64 & mask) | (parent1.solution[i] as i64 & !mask);
@@ -297,7 +288,7 @@ impl Crossover for UniformCrossover {
                     }
                 }
                 SolutionDataTypes::BitBinary(_) => {
-                    if rand::thread_rng().gen::<f64>() < self.probability {
+                    if rng.gen::<f64>() < self.probability {
                         let c1 = (parent1.solution[i] as i64) ^ (1); // Flip the bit for child1
                         let c2 = (parent2.solution[i] as i64) ^ (1); // Flip the bit for child2
                         child1.solution[i] = c1 as f64;
@@ -322,7 +313,7 @@ pub struct ArithmeticCrossover {
 }
 
 impl Crossover for ArithmeticCrossover {
-    fn crossover(&self, parent1: &Solution, parent2: &Solution) -> (Solution, Solution) {
+    fn crossover(&self, parent1: &Solution, parent2: &Solution, _rng: &mut SmallRng) -> (Solution, Solution) {
         let mut child1 = parent1.clone();
         let mut child2 = parent2.clone();
         for (i, solution_type) in parent1.problem.solution_data_types.iter().enumerate() {
@@ -331,8 +322,8 @@ impl Crossover for ArithmeticCrossover {
                 let upper = integer.upper_bound.unwrap_or(i64::MAX);
                 let c1 = (parent1.solution[i] + parent2.solution[i]) / 2.;
                 let c2 = (parent1.solution[i] + parent2.solution[i]) / 2.;
-                child1.solution[i] = clip(c1, lower as f64, upper as f64) as f64;
-                child2.solution[i] = clip(c2, lower as f64, upper as f64) as f64;
+                child1.solution[i] = c1.clamp(lower as f64, upper as f64);
+                child2.solution[i] = c2.clamp(lower as f64, upper as f64);
             }
         }
 
@@ -351,7 +342,6 @@ pub struct CrossoverManager {
     default_real_crossover: Box<dyn Crossover + Send>,
     default_integer_crossover: Box<dyn Crossover + Send>,
     default_binary_crossover: Box<dyn Crossover + Send>,
-    custom_crossovers: HashMap<usize, Box<dyn Crossover + Send>>,
 }
 
 impl CrossoverManager {
@@ -361,13 +351,7 @@ impl CrossoverManager {
             default_real_crossover: Box::new(SimulatedBinaryCrossover::new(None, None)),
             default_integer_crossover: Box::new(UniformCrossover { probability: 1.0 }),
             default_binary_crossover: Box::new(UniformCrossover { probability: 1.0 }),
-            custom_crossovers: HashMap::new(),
         }
-    }
-
-    /// Sets a custom crossover for a specific index
-    pub fn set_custom_crossover(&mut self, index: usize, crossover: Box<dyn Crossover + Send>) {
-        self.custom_crossovers.insert(index, crossover);
     }
 
     /// Sets the default crossover for Real types
@@ -390,22 +374,34 @@ impl CrossoverManager {
         &self,
         parent1: &Solution,
         parent2: &Solution,
+        rng: &mut SmallRng,
     ) -> Vec<Solution> {
+        let types = &parent1.problem.solution_data_types;
+
+        // Each operator only touches genes of its own type (others pass through unchanged),
+        // so call each *once* on the whole pair and take each gene from the operator that
+        // owns its type. Previously this ran a full crossover per gene — O(D²) work and ~2D
+        // full-solution clones per pair; now it is O(D) with at most 3 operator calls.
+        let need = |f: fn(&SolutionDataTypes) -> bool| types.iter().any(f);
+        let real = if need(|t| matches!(t, SolutionDataTypes::Real(_))) {
+            Some(self.default_real_crossover.crossover(parent1, parent2, rng))
+        } else { None };
+        let integer = if need(|t| matches!(t, SolutionDataTypes::Integer(_))) {
+            Some(self.default_integer_crossover.crossover(parent1, parent2, rng))
+        } else { None };
+        let binary = if need(|t| matches!(t, SolutionDataTypes::BitBinary(_))) {
+            Some(self.default_binary_crossover.crossover(parent1, parent2, rng))
+        } else { None };
+
         let mut child1 = parent1.clone();
         let mut child2 = parent2.clone();
-
-        for (i, solution_type) in parent1.problem.solution_data_types.iter().enumerate() {
-            let crossover = self.custom_crossovers.get(&i).or_else(|| {
-                match solution_type {
-                    SolutionDataTypes::Real(_) => Some(&self.default_real_crossover),
-                    SolutionDataTypes::Integer(_) => Some(&self.default_integer_crossover),
-                    SolutionDataTypes::BitBinary(_) => Some(&self.default_binary_crossover),
-                    _ => None, // Skip unsupported types
-                }
-            });
-
-            if let Some(crossover) = crossover {
-                let (c1, c2) = crossover.crossover(parent1, parent2);
+        for (i, solution_type) in types.iter().enumerate() {
+            let res = match solution_type {
+                SolutionDataTypes::Real(_) => real.as_ref(),
+                SolutionDataTypes::Integer(_) => integer.as_ref(),
+                SolutionDataTypes::BitBinary(_) => binary.as_ref(),
+            };
+            if let Some((c1, c2)) = res {
                 child1.solution[i] = c1.solution[i];
                 child2.solution[i] = c2.solution[i];
             }
@@ -425,7 +421,12 @@ impl CrossoverManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::SeedableRng;
     use std::sync::Arc;
+
+    fn test_rng() -> SmallRng {
+        SmallRng::seed_from_u64(0)
+    }
     use crate::core::{EvalFn, Problem, Solution};
     use crate::gatypes::{SolutionDataTypes, Real, BitBinary, Integer};
 
@@ -443,6 +444,7 @@ mod tests {
                 SolutionDataTypes::Real(Real::new(Some(10.0), Some(1000.0))),
                 SolutionDataTypes::Real(Real::new(Some(10.0), Some(1000.0))),
             ],
+            variable_constraints: None,
             eval_fn: EvalFn::Single(|x| vec![x.iter().sum()]),
         }
     }
@@ -484,13 +486,13 @@ mod tests {
         let problem = Arc::new(setup_problem());
         let solutions = setup_solutions(Arc::clone(&problem));
         let sbx = SimulatedBinaryCrossover::new(None, None);
-        let (_child1, _child2) = sbx.crossover(&solutions[0], &solutions[2]);
+        let (_child1, _child2) = sbx.crossover(&solutions[0], &solutions[2], &mut test_rng());
     }
 
     #[test]
     fn test_sbx_crossover_same_values() {
         let sbx = SimulatedBinaryCrossover::new(None, None);
-        let (c1, c2) = sbx.sbx_crossover(10.0, 10.0, 0.0, 30.0);
+        let (c1, c2) = sbx.sbx_crossover(10.0, 10.0, 0.0, 30.0, &mut test_rng());
         assert_eq!(c1, 10.0);
         assert_eq!(c2, 10.0);
     }
@@ -498,7 +500,7 @@ mod tests {
     #[test]
     fn test_sbx_crossover_same_values_with_bounds() {
         let sbx = SimulatedBinaryCrossover::new(None, None);
-        let (c1, c2) = sbx.sbx_crossover(10.0, 10.0, 10.0, 10.0);
+        let (c1, c2) = sbx.sbx_crossover(10.0, 10.0, 10.0, 10.0, &mut test_rng());
         assert_eq!(c1, 10.0);
         assert_eq!(c2, 10.0);
     }
@@ -525,7 +527,7 @@ mod tests {
             evaluated: false,
         };
         let uc = UniformCrossover { probability: 1.0 };
-        let (child1, child2) = uc.crossover(&parent1, &parent2);
+        let (child1, child2) = uc.crossover(&parent1, &parent2, &mut test_rng());
         assert_ne!(child1.solution, parent1.solution);
         assert_ne!(child2.solution, parent2.solution);
     }
@@ -552,7 +554,7 @@ mod tests {
             evaluated: false,
         };
         let pcc = ParentCentricCrossover { nparents: 2, noffspring: 2, eta: 0.5, zeta: 0.5 };
-        let (child1, child2) = pcc.crossover(&parent1, &parent2);
+        let (child1, child2) = pcc.crossover(&parent1, &parent2, &mut test_rng());
         assert_ne!(child1.solution, parent1.solution);
         assert_ne!(child2.solution, parent2.solution);
     }
@@ -579,7 +581,7 @@ mod tests {
             evaluated: false,
         };
         let udc = UnimodalDistributionCrossover { probability: 1.0, distribution_index: 20.0, nparents: 2, zeta: 0.5, eta: 0.5 };
-        let (child1, child2) = udc.crossover(&parent1, &parent2);
+        let (child1, child2) = udc.crossover(&parent1, &parent2, &mut test_rng());
         assert_ne!(child1.solution, parent1.solution);
         assert_ne!(child2.solution, parent2.solution);
     }
@@ -606,7 +608,7 @@ mod tests {
             evaluated: false,
         };
         let cm = CrossoverManager::new();
-        let children = cm.perform_crossover(&parent1, &parent2);
+        let children = cm.perform_crossover(&parent1, &parent2, &mut test_rng());
         assert_ne!(children[0].solution, parent1.solution);
         assert_ne!(children[1].solution, parent2.solution);
     }

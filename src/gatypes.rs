@@ -1,6 +1,6 @@
 // import random crate
 use rand::Rng;
-// import the powf function from the f64 module
+use rand::rngs::SmallRng;
 
 
 // Create Enum for types called SolutionType
@@ -10,45 +10,6 @@ pub enum SolutionDataTypes {
     Integer(Integer),
     BitBinary(BitBinary)
 }
-
-pub trait SolutionType {
-    fn generate_value(&self) -> Option<i64>;
-    
-}
-
-pub enum RealDataType { 
-    F64, 
-    F32, 
-    F128, 
-    F256,
-    F16
-
-}
-
-pub enum IntegerDataType { 
-    I64, 
-    I32, 
-    I16, 
-    I8, 
-    U64, 
-    U32, 
-    U16, 
-    U8
-
-}
-
-pub enum BinaryDataType { 
-    Bool, 
-    U8,
-    U4, 
-    U2, 
-    U16, 
-    U32, 
-    U64, 
-    U128,
-    U256
-}
-
 
 #[derive(Debug, Clone)]
 pub struct BitBinary {
@@ -60,10 +21,8 @@ impl BitBinary {
         Self { }
     }
 
-    pub fn generate_value(&self) -> Option<i64> {
-        let mut rng = rand::thread_rng();
+    pub fn generate_value(&self, rng: &mut SmallRng) -> Option<i64> {
         Some(rng.gen_range(0..2))
-        
     }
 }
 
@@ -92,8 +51,7 @@ impl Integer {
         }
     }
     // Create Generate Value Method
-    pub fn generate_value(&self) -> Option<i64> {
-        let mut rng = rand::thread_rng();
+    pub fn generate_value(&self, rng: &mut SmallRng) -> Option<i64> {
         Some(rng.gen_range(self.lower_bound.unwrap_or(i64::MIN)..self.upper_bound.unwrap_or(i64::MAX)))
     }
 }
@@ -121,8 +79,7 @@ impl Real {
         }
     }
 
-    pub fn generate_value(&self) -> Option<f64> {
-        let mut rng = rand::thread_rng();
+    pub fn generate_value(&self, rng: &mut SmallRng) -> Option<f64> {
         Some(rng.gen_range(self.lower_bound.unwrap_or(f64::MIN)..self.upper_bound.unwrap_or(f64::MAX)))
     }
 }
@@ -131,39 +88,44 @@ impl Real {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::SeedableRng;
 
     #[test]
     fn test_bit_binary_generation() {
+        let mut rng = SmallRng::seed_from_u64(0);
         let bit_binary = BitBinary::new();
         for _ in 0..100 {
-            let value = bit_binary.generate_value().unwrap();
+            let value = bit_binary.generate_value(&mut rng).unwrap();
             assert!(value == 0 || value == 1);
         }
     }
 
     #[test]
     fn test_integer_generation_with_bounds() {
+        let mut rng = SmallRng::seed_from_u64(0);
         let integer = Integer::new(Some(10), Some(20));
         for _ in 0..100 {
-            let value = integer.generate_value().unwrap();
+            let value = integer.generate_value(&mut rng).unwrap();
             assert!(value >= 10 && value < 20);
         }
     }
 
     #[test]
     fn test_real_generation_with_bounds() {
+        let mut rng = SmallRng::seed_from_u64(0);
         let real = Real::new(Some(10.0), Some(20.0));
         for _ in 0..100 {
-            let value = real.generate_value().unwrap();
+            let value = real.generate_value(&mut rng).unwrap();
             assert!(value >= 10.0 && value < 20.0);
         }
     }
 
     #[test]
     fn test_integer_generation_without_bounds() {
+        let mut rng = SmallRng::seed_from_u64(0);
         let integer = Integer::new(None, None);
         for _ in 0..100 {
-            let value = integer.generate_value().unwrap();
+            let value = integer.generate_value(&mut rng).unwrap();
             // Just test that a value is generated; range is too large to test accurately
             assert!(value >= i64::MIN && value <= i64::MAX);
         }

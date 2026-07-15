@@ -18,6 +18,10 @@
 /// }
 /// @group(0) @binding(2) var<uniform> params: Params;
 ///
+/// // Optional read-only auxiliary data (e.g. a flattened covariance matrix),
+/// // uploaded via `new_blocking_with_data`. A 1-element placeholder when unused.
+/// @group(0) @binding(3) var<storage, read> data: array<f32>;
+///
 /// @compute @workgroup_size(64)
 /// fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 ///     let sol_idx = id.x;
@@ -35,6 +39,9 @@ pub struct GpuEvaluator {
     queue: wgpu::Queue,
     pipeline: wgpu::ComputePipeline,
     bind_group_layout: wgpu::BindGroupLayout,
+    /// Read-only auxiliary data bound at `@group(0) @binding(3)` (e.g. a covariance matrix),
+    /// so data-driven objectives can run on the GPU. Empty when the objective is self-contained.
+    data_buffer: wgpu::Buffer,
     pub solution_length: usize,
     pub num_objectives: usize,
 }
@@ -64,13 +71,25 @@ impl GpuEvaluator {
         solution_length: usize,
         num_objectives: usize,
     ) -> Self {
-        pollster::block_on(Self::new_async(shader_wgsl, solution_length, num_objectives))
+        pollster::block_on(Self::new_async(shader_wgsl, solution_length, num_objectives, &[]))
+    }
+
+    /// Like `new_blocking`, but uploads read-only `data` (f32) bound at `@group(0) @binding(3)`.
+    /// Use for data-driven objectives — bake nothing into the shader, read `data` instead.
+    pub fn new_blocking_with_data(
+        shader_wgsl: &str,
+        solution_length: usize,
+        num_objectives: usize,
+        data: &[f32],
+    ) -> Self {
+        pollster::block_on(Self::new_async(shader_wgsl, solution_length, num_objectives, data))
     }
 
     async fn new_async(
         shader_wgsl: &str,
         solution_length: usize,
         num_objectives: usize,
+        data: &[f32],
     ) -> Self {
         let instance = wgpu::Instance::default();
 
@@ -82,6 +101,9 @@ impl GpuEvaluator {
             })
             .await
             .expect("No GPU adapter found. Ensure a wgpu-compatible GPU is available.");
+
+        let info = adapter.get_info();
+        eprintln!("rustypus: GPU = {} ({:?}, {:?})", info.name, info.device_type, info.backend);
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor::default(), None)
@@ -129,7 +151,26 @@ impl GpuEvaluator {
                     },
                     count: None,
                 },
+                // binding 3: read-only auxiliary data (optional; unused by self-contained shaders)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
+        });
+
+        // Upload the auxiliary data (or a 1-element placeholder — zero-sized buffers are invalid).
+        let data_src: Vec<f32> = if data.is_empty() { vec![0.0] } else { data.to_vec() };
+        let data_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rustypus_data"),
+            contents: unsafe { as_bytes(&data_src) },
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -142,7 +183,7 @@ impl GpuEvaluator {
             label: Some("rustypus_compute_pipeline"),
             layout: Some(&pipeline_layout),
             module: &shader,
-            entry_point: Some("main"),
+            entry_point: "main",
             compilation_options: wgpu::PipelineCompilationOptions::default(),
             cache: None,
         });
@@ -152,6 +193,7 @@ impl GpuEvaluator {
             queue,
             pipeline,
             bind_group_layout,
+            data_buffer,
             solution_length,
             num_objectives,
         }
@@ -214,6 +256,7 @@ impl GpuEvaluator {
                 wgpu::BindGroupEntry { binding: 0, resource: solution_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: objectives_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: params_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: self.data_buffer.as_entire_binding() },
             ],
         });
 
