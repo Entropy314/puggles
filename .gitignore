@@ -1,6 +1,11 @@
 /target
+sandbox/
 .DS_Store
 .vscode/*
 .vscode
 .vscode/settings.json
 .vscode/settings.json
+.venv/
+*.ipynb
+.ipynb_checkpoints/
+.claude/*
