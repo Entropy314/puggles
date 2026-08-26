@@ -1,0 +1,23 @@
+[workspace]
+
+[package]
+name = "rustypus-sandbox"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+gpu = ["rustypus/gpu"]
+
+[dependencies]
+rustypus = { path = ".." }
+polars   = { version = "0.46", features = ["lazy", "csv"] }
+sysinfo  = { version = "0.33", default-features = false, features = ["system"] }
+# Single-objective Rust GA libraries, for the §7 cross-library comparison (bench_singleobj).
+genevo            = "0.7"
+genetic_algorithm = "0.27"
+
+# Benchmarks build from this workspace, so the release profile is set here (a path
+# dependency inherits the profile of the workspace being built, not its own).
+[profile.release]
+lto = true
+codegen-units = 1
