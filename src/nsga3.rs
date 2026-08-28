@@ -120,8 +120,8 @@ impl NSGAIII {
             pop.push(Solution {
                 problem: Arc::clone(&problem),
                 solution,
-                objective_fitness_values: Vec::new(),
-                constraint_values: Vec::new(),
+                objective_fitness_values: Default::default(),
+                constraint_values: Default::default(),
                 evaluated: false,
                 constraint_violation: 0,
                 feasible: false,

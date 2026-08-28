@@ -173,9 +173,19 @@ impl NSGAII {
     /// When the non-dominated set exceeds the cap, prune by crowding distance
     /// (drop the most crowded solutions) to keep diversity.
     pub fn update_archive(&mut self) {
-        let feasible: Vec<Solution> = self.population.iter()
-            .filter(|s| s.feasible && s.evaluated)
-            .cloned()
+        // Only population front-0 can enter the archive: any feasible non-front-0 solution is
+        // dominated by a feasible rank-0 one (a feasible solution always dominates an infeasible
+        // one on constraints), so nondominated(archive ∪ feasible) == nondominated(archive ∪
+        // front0-feasible). Exact — same archive — but clones only the candidates, not every
+        // feasible member. Falls back to all-feasible if ranks are stale (called outside the loop).
+        let ranks_valid = self.ranks.len() == self.population.len();
+        let ranks = &self.ranks;
+        let feasible: Vec<Solution> = self
+            .population
+            .iter()
+            .enumerate()
+            .filter(|(i, s)| s.feasible && s.evaluated && (!ranks_valid || ranks[*i] == 0))
+            .map(|(_, s)| s.clone())
             .collect();
 
         if feasible.is_empty() {
@@ -379,8 +389,8 @@ impl NSGAII {
             pop.push(Solution {
                 problem: Arc::clone(&problem),
                 solution,
-                objective_fitness_values: Vec::new(),
-                constraint_values: Vec::new(),
+                objective_fitness_values: Default::default(),
+                constraint_values: Default::default(),
                 evaluated: false,
                 constraint_violation: 0,
                 feasible: false,
@@ -402,10 +412,10 @@ impl NSGAII {
                     .collect();
                 let outputs = batch_fn(&inputs);
                 for (local_i, &global_i) in unevaluated.iter().enumerate() {
-                    population[global_i].objective_fitness_values = outputs[local_i].clone();
+                    population[global_i].objective_fitness_values = outputs[local_i].clone().into();
                     population[global_i].evaluated = true;
                     let cv = population[global_i].evaluate_constraints();
-                    population[global_i].constraint_values = cv;
+                    population[global_i].constraint_values = cv.into();
                     let viol = population[global_i].calculate_constraint_violation();
                     population[global_i].constraint_violation = viol;
                     let feas = population[global_i].is_feasible();
@@ -430,10 +440,10 @@ impl NSGAII {
                         .collect();
                     let outputs = gpu.evaluate_batch(&inputs);
                     for (local_i, &global_i) in unevaluated.iter().enumerate() {
-                        population[global_i].objective_fitness_values = outputs[local_i].clone();
+                        population[global_i].objective_fitness_values = outputs[local_i].clone().into();
                         population[global_i].evaluated = true;
                         let cv = population[global_i].evaluate_constraints();
-                        population[global_i].constraint_values = cv;
+                        population[global_i].constraint_values = cv.into();
                         let viol = population[global_i].calculate_constraint_violation();
                         population[global_i].constraint_violation = viol;
                         let feas = population[global_i].is_feasible();

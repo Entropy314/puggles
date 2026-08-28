@@ -273,8 +273,8 @@ mod tests {
         Solution {
             problem,
             solution: vec![1.0, 10.0, 10.0, 10.0, 10.0],
-            objective_fitness_values: Vec::new(),
-            constraint_values: Vec::new(),
+            objective_fitness_values: Default::default(),
+            constraint_values: Default::default(),
             constraint_violation: 0,
             feasible: false,
             evaluated: false,

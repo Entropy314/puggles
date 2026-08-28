@@ -393,19 +393,30 @@ impl CrossoverManager {
             Some(self.default_binary_crossover.crossover(parent1, parent2, rng))
         } else { None };
 
-        let mut child1 = parent1.clone();
-        let mut child2 = parent2.clone();
-        for (i, solution_type) in types.iter().enumerate() {
-            let res = match solution_type {
-                SolutionDataTypes::Real(_) => real.as_ref(),
-                SolutionDataTypes::Integer(_) => integer.as_ref(),
-                SolutionDataTypes::BitBinary(_) => binary.as_ref(),
-            };
-            if let Some((c1, c2)) = res {
-                child1.solution[i] = c1.solution[i];
-                child2.solution[i] = c2.solution[i];
+        // Single gene type (the common case — all-Real/Integer/Binary problems): the operator
+        // already produced the two children as parent clones with its own genes crossed, so return
+        // them directly — no second parent-clone pair + per-gene merge. RNG use is unchanged, so
+        // this is bit-identical to the merge path (~2 Solution clones/pair instead of ~4).
+        let present = real.is_some() as u8 + integer.is_some() as u8 + binary.is_some() as u8;
+        let (mut child1, mut child2) = if present == 1 {
+            real.or(integer).or(binary).expect("one gene type present")
+        } else {
+            // Mixed types (rare): merge each operator's own-typed genes into a parent-clone base.
+            let mut c1 = parent1.clone();
+            let mut c2 = parent2.clone();
+            for (i, solution_type) in types.iter().enumerate() {
+                let res = match solution_type {
+                    SolutionDataTypes::Real(_) => real.as_ref(),
+                    SolutionDataTypes::Integer(_) => integer.as_ref(),
+                    SolutionDataTypes::BitBinary(_) => binary.as_ref(),
+                };
+                if let Some((rc1, rc2)) = res {
+                    c1.solution[i] = rc1.solution[i];
+                    c2.solution[i] = rc2.solution[i];
+                }
             }
-        }
+            (c1, c2)
+        };
 
         child1.evaluated = false;
         child1.feasible = false;
@@ -454,8 +465,8 @@ mod tests {
             Solution {
                 problem: Arc::clone(&problem),
                 solution: vec![1.0, 10.0, 10.0, 10.0, 10.0],
-                objective_fitness_values: Vec::new(),
-                constraint_values: Vec::new(),
+                objective_fitness_values: Default::default(),
+                constraint_values: Default::default(),
                 constraint_violation: 0,
                 feasible: false,
                 evaluated: false,
@@ -463,8 +474,8 @@ mod tests {
             Solution {
                 problem: Arc::clone(&problem),
                 solution: vec![1.0, 20.0, 20.0, 20.0, 20.0],
-                objective_fitness_values: Vec::new(),
-                constraint_values: Vec::new(),
+                objective_fitness_values: Default::default(),
+                constraint_values: Default::default(),
                 constraint_violation: 0,
                 feasible: false,
                 evaluated: false,
@@ -472,8 +483,8 @@ mod tests {
             Solution {
                 problem: Arc::clone(&problem),
                 solution: vec![0.0, 15.0, 15.0, 15.0, 15.0],
-                objective_fitness_values: Vec::new(),
-                constraint_values: Vec::new(),
+                objective_fitness_values: Default::default(),
+                constraint_values: Default::default(),
                 constraint_violation: 0,
                 feasible: false,
                 evaluated: false,
@@ -511,8 +522,8 @@ mod tests {
         let parent1 = Solution {
             problem: Arc::clone(&problem),
             solution: vec![1.0, 10.0, 10.0, 10.0, 10.0],
-            objective_fitness_values: Vec::new(),
-            constraint_values: Vec::new(),
+            objective_fitness_values: Default::default(),
+            constraint_values: Default::default(),
             constraint_violation: 0,
             feasible: false,
             evaluated: false,
@@ -520,8 +531,8 @@ mod tests {
         let parent2 = Solution {
             problem: Arc::clone(&problem),
             solution: vec![0.0, 20.0, 20.0, 20.0, 20.0],
-            objective_fitness_values: Vec::new(),
-            constraint_values: Vec::new(),
+            objective_fitness_values: Default::default(),
+            constraint_values: Default::default(),
             constraint_violation: 0,
             feasible: false,
             evaluated: false,
@@ -538,8 +549,8 @@ mod tests {
         let parent1 = Solution {
             problem: Arc::clone(&problem),
             solution: vec![1.0, 10.0, 20.0, 30.0, 40.0],
-            objective_fitness_values: Vec::new(),
-            constraint_values: Vec::new(),
+            objective_fitness_values: Default::default(),
+            constraint_values: Default::default(),
             constraint_violation: 0,
             feasible: false,
             evaluated: false,
@@ -547,8 +558,8 @@ mod tests {
         let parent2 = Solution {
             problem: Arc::clone(&problem),
             solution: vec![0.0, 60.0, 70.5, 80.2, 90.3],
-            objective_fitness_values: Vec::new(),
-            constraint_values: Vec::new(),
+            objective_fitness_values: Default::default(),
+            constraint_values: Default::default(),
             constraint_violation: 0,
             feasible: false,
             evaluated: false,
@@ -565,8 +576,8 @@ mod tests {
         let parent1 = Solution {
             problem: Arc::clone(&problem),
             solution: vec![1.0, 10.0, 20.0, 30.0, 40.0],
-            objective_fitness_values: Vec::new(),
-            constraint_values: Vec::new(),
+            objective_fitness_values: Default::default(),
+            constraint_values: Default::default(),
             constraint_violation: 0,
             feasible: false,
             evaluated: false,
@@ -574,8 +585,8 @@ mod tests {
         let parent2 = Solution {
             problem: Arc::clone(&problem),
             solution: vec![0.0, 60.0, 70.5, 80.2, 90.3],
-            objective_fitness_values: Vec::new(),
-            constraint_values: Vec::new(),
+            objective_fitness_values: Default::default(),
+            constraint_values: Default::default(),
             constraint_violation: 0,
             feasible: false,
             evaluated: false,
@@ -592,8 +603,8 @@ mod tests {
         let parent1 = Solution {
             problem: Arc::clone(&problem),
             solution: vec![1.0, 10.0, 20.0, 30.0, 40.0],
-            objective_fitness_values: Vec::new(),
-            constraint_values: Vec::new(),
+            objective_fitness_values: Default::default(),
+            constraint_values: Default::default(),
             constraint_violation: 0,
             feasible: false,
             evaluated: false,
@@ -601,8 +612,8 @@ mod tests {
         let parent2 = Solution {
             problem: Arc::clone(&problem),
             solution: vec![0.0, 60.0, 70.5, 80.2, 90.3],
-            objective_fitness_values: Vec::new(),
-            constraint_values: Vec::new(),
+            objective_fitness_values: Default::default(),
+            constraint_values: Default::default(),
             constraint_violation: 0,
             feasible: false,
             evaluated: false,

@@ -31,8 +31,8 @@ impl SolutionRecord {
     pub fn from_solution(s: &Solution) -> Self {
         SolutionRecord {
             solution: s.solution.clone(),
-            objective_fitness_values: s.objective_fitness_values.clone(),
-            constraint_values: s.constraint_values.clone(),
+            objective_fitness_values: s.objective_fitness_values.to_vec(),
+            constraint_values: s.constraint_values.to_vec(),
             constraint_violation: s.constraint_violation,
             feasible: s.feasible,
             evaluated: s.evaluated,
@@ -43,8 +43,8 @@ impl SolutionRecord {
         Solution {
             problem,
             solution: self.solution,
-            objective_fitness_values: self.objective_fitness_values,
-            constraint_values: self.constraint_values,
+            objective_fitness_values: self.objective_fitness_values.into(),
+            constraint_values: self.constraint_values.into(),
             constraint_violation: self.constraint_violation,
             feasible: self.feasible,
             evaluated: self.evaluated,

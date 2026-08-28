@@ -1,7 +1,12 @@
 use crate::gatypes::SolutionDataTypes;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
+use smallvec::SmallVec;
 use std::sync::Arc;
+
+/// Objective/constraint value vectors — inline for the small objective counts (≤ 4) typical of
+/// multi-objective work, so a `Solution` clone allocates nothing for them (genes stay a `Vec`).
+pub type ObjVec = SmallVec<[f64; 4]>;
 
 /// Evaluation function discriminant: single-solution or batch.
 #[derive(Clone, Debug)]
@@ -102,8 +107,8 @@ impl Problem {
 pub struct Solution {
     pub problem: Arc<Problem>,
     pub solution: Vec<f64>, // Derived from Problem.solution_data_types
-    pub objective_fitness_values: Vec<f64>,
-    pub constraint_values: Vec<f64>,
+    pub objective_fitness_values: ObjVec,
+    pub constraint_values: ObjVec,
     pub evaluated: bool, // default false
     pub constraint_violation: usize, // default 0
     pub feasible: bool
@@ -117,8 +122,8 @@ impl Solution {
         let mut rng = SmallRng::from_entropy();
         let solution = problem.generate_solution(&mut rng);
         // create vectore of length number_of_objectives
-        let objective_fitness_values: Vec<f64> = Vec::with_capacity(problem.number_of_objectives);
-        let constraint_values: Vec<f64> = Vec::with_capacity(problem.number_of_objectives);
+        let objective_fitness_values: ObjVec = ObjVec::new();
+        let constraint_values: ObjVec = ObjVec::new();
         let evaluated: bool = false;
         let constraint_violation = 0;
         let feasible = false;
@@ -182,14 +187,14 @@ impl Solution {
 
     pub fn evaluate(&mut self) {
         self.objective_fitness_values = match self.problem.eval_fn {
-            EvalFn::Single(f) => f(&self.solution),
+            EvalFn::Single(f) => f(&self.solution).into(),
             EvalFn::Batch(_) => panic!(
                 "Solution::evaluate() called on a batch-mode Problem. \
                  Use evaluate_population() instead."
             ),
         };
         self.evaluated = true;
-        self.constraint_values = self.evaluate_constraints();
+        self.constraint_values = self.evaluate_constraints().into();
         self.constraint_violation = self.calculate_constraint_violation();
         self.feasible = self.is_feasible();
     }
