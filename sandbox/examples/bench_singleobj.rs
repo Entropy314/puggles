@@ -22,7 +22,8 @@ use std::time::Instant;
 const N: usize = 10; // dimensions
 const POP: usize = 100;
 const NFE: usize = 20_000; // equal evaluation budget for every library
-const RUNS: usize = 5;
+const RUNS: usize = 15; // more runs → stable means (Rastrigin is multi-modal; rustypus +
+                        // genetic_algorithm are seeded per run for reproducibility)
 const BOUND: f64 = 5.12;
 
 /// Counts every real objective evaluation, across all libraries, so the budget is comparable.
@@ -83,9 +84,10 @@ fn bench_rustypus() -> Row {
     NSGAII::new(Arc::clone(&problem), POP, ExecutionMode::Sequential).run(NFE); // warm-up
 
     let (mut times, mut bests, mut nevals) = (Vec::new(), Vec::new(), Vec::new());
-    for _ in 0..RUNS {
+    for run in 0..RUNS {
         reset_evals();
-        let mut ga = NSGAII::new(Arc::clone(&problem), POP, ExecutionMode::Sequential);
+        let mut ga =
+            NSGAII::new(Arc::clone(&problem), POP, ExecutionMode::Sequential).with_seed(run as u64);
         let t0 = Instant::now();
         ga.run(NFE); // run() counts its own NFE → ~NFE real evaluations
         times.push(t0.elapsed().as_secs_f64() * 1000.0);
@@ -200,7 +202,7 @@ fn bench_genetic_algorithm() -> Row {
         }
     }
 
-    let run_gens = |gens: usize| -> f64 {
+    let run_gens = |gens: usize, seed: u64| -> f64 {
         let genotype = RangeGenotype::builder()
             .with_genes_size(N)
             .with_allele_range(-BOUND..=BOUND)
@@ -216,6 +218,7 @@ fn bench_genetic_algorithm() -> Row {
             .with_select(SelectTournament::new(0.5, 0.02, 4))
             .with_crossover(CrossoverUniform::new(0.7, 0.8))
             .with_mutate(MutateSingleGene::new(0.2))
+            .with_rng_seed_from_u64(seed)
             .call()
             .unwrap();
         evolve.best_fitness_score().unwrap() as f64 / 1000.0
@@ -225,17 +228,17 @@ fn bench_genetic_algorithm() -> Row {
     // pick the generation count that spends ≈ NFE real evaluations.
     const PROBE_GENS: usize = 200;
     reset_evals();
-    run_gens(PROBE_GENS);
+    run_gens(PROBE_GENS, 0);
     let per_gen = (evals() as f64 / PROBE_GENS as f64).max(1.0);
     let gens = ((NFE as f64 / per_gen).round() as usize).max(1);
 
-    run_gens(gens); // warm-up at the calibrated budget
+    run_gens(gens, 0); // warm-up at the calibrated budget
 
     let (mut times, mut bests, mut nevals) = (Vec::new(), Vec::new(), Vec::new());
-    for _ in 0..RUNS {
+    for run in 0..RUNS {
         reset_evals();
         let t0 = Instant::now();
-        let best = run_gens(gens);
+        let best = run_gens(gens, run as u64);
         times.push(t0.elapsed().as_secs_f64() * 1000.0);
         nevals.push(evals() as f64);
         bests.push(best);

@@ -6,7 +6,7 @@ Install Python libraries:
     pip install platypus-opt pymoo deap
 
 For rustypus Python bindings, cd to python/ and run:
-    PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin develop --release
+    maturin develop --release
 
 Run:
     python3 bench_python.py
@@ -74,6 +74,38 @@ def bench_rustypus_py(mode="sequential"):
             direction=[-1, -1],
         )
         ga = rp.NSGAII(problem, population_size=POP, execution_mode=mode)
+        t0 = time.perf_counter()
+        ga.run(NFE)
+        times.append((time.perf_counter() - t0) * 1000)
+        igds.append(igd([(s.objectives[0], s.objectives[1]) for s in ga.get_archive()]))
+    return times, igds
+
+
+def bench_rustypus_py_batch():
+    """
+    rustypus with a BATCH objective: the GA calls one vectorized function per generation
+    (whole population at once) instead of one Python call per solution — so the GIL is
+    crossed ~POP× less often. The batch fn evaluates all solutions with NumPy.
+    """
+    import numpy as np
+    import rustypus as rp
+
+    def zdt1_batch(pop):
+        X = np.asarray(pop, dtype=float)  # (P, N)
+        f1 = X[:, 0]
+        g = 1 + 9 / (N - 1) * X[:, 1:].sum(1)
+        f2 = g * (1 - (f1 / g) ** 0.5)
+        return np.column_stack([f1, f2]).tolist()
+
+    times, igds = [], []
+    for _ in range(RUNS):
+        problem = rp.Problem(
+            solution_length=N, number_of_objectives=2,
+            solution_data_types=[rp.Real(0.0, 1.0)] * N,
+            batch_objective_function=zdt1_batch,
+            direction=[-1, -1],
+        )
+        ga = rp.NSGAII(problem, population_size=POP, execution_mode="sequential")
         t0 = time.perf_counter()
         ga.run(NFE)
         times.append((time.perf_counter() - t0) * 1000)
@@ -198,6 +230,7 @@ def bench_deap():
 # every eval; "multithreaded" would only deadlock), so a single rustypus (py) row.
 BENCHMARKS = [
     ("rustypus (py)",             lambda: bench_rustypus_py("sequential")),
+    ("rustypus (py, batch)",      bench_rustypus_py_batch),
     ("pymoo",                     bench_pymoo),
     ("platypus",                  bench_platypus),
     ("DEAP",                      bench_deap),

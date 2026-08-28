@@ -2193,6 +2193,7 @@ dependencies = [
  "rand",
  "rayon",
  "serde",
+ "smallvec",
  "wgpu",
 ]
 

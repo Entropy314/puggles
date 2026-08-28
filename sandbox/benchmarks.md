@@ -21,14 +21,14 @@
 > apples-to-apples with how pymoo/platypus/DEAP are used. Every eval crosses the FFI boundary and
 > re-acquires the GIL, so `py` runs always execute Sequential; it is still far faster than the
 > other Python libraries because the GA machinery (sort/select/variation) stays in Rust. Install
-> the bindings with `cd python && PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin develop --release`.
+> the bindings with `cd python && maturin develop --release` (pyo3 0.25 supports Python 3.14 natively).
 
 **Run:**
 
 ```bash
 cd sandbox
 # Build + install the Python bindings once (for every "rustypus (py)" row):
-( cd ../python && PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 ../sandbox/.venv/bin/maturin develop --release )
+( cd ../python && ../sandbox/.venv/bin/maturin develop --release )
 
 cargo run --release --example bench_zdt1                       # §1 + §2 (CPU, native)
 .venv/bin/python bench_python.py                               # §1 (5-way: +rustypus-py/pymoo/platypus/DEAP)
@@ -66,7 +66,7 @@ cargo run --release --example bench_singleobj                  # §5 (single-obj
 
 | library | ms / run | ±std | IGD | ±std |
 | --- | --- | --- | --- | --- |
-| **rustypus (native, sequential)** | **27.1** | 2.1 | 0.0050 | 0.0002 |
+| **rustypus (native, sequential)** | **19.6** | 1.2 | 0.0053 | 0.0001 |
 | rustypus (native, parallel) | 35.5 | 0.2 | 0.0051 | 0.0001 |
 | **rustypus (py)** | **31.8** | 3.1 | 0.0051 | 0.0003 |
 | pymoo | 215.4 | 12.8 | 0.0045 | 0.0004 |
@@ -78,6 +78,13 @@ cargo run --release --example bench_singleobj                  # §5 (single-obj
 **Why rustypus is fastest (27 ms vs pymoo 215 ms — ~8×):** ZDT1 costs ~30–70 ns per evaluation, so the ~0.7 ms of actual objective math is <1% of runtime. Everything else is **algorithm overhead** — non-dominated sort, crowding distance, selection, variation, allocation — which compiled Rust does with far less per-item cost than pymoo's NumPy batch dispatch, and ~13–16× less than the pure-Python loops in platypus/DEAP.
 
 **rustypus (py) — 31.8 ms, ~7× faster than pymoo — despite a Python objective.** The bindings call a Python `lambda` per evaluation (FFI + GIL re-acquire each time), yet the whole GA loop stays in Rust, so it lands within ~1.2× of native rustypus and still crushes the other Python libraries. This is the fair "use rustypus from Python" number; a native Rust objective (no per-eval GIL) matches the native row.
+
+**Batch objectives amortize the GIL.** For an *expensive* Python objective, pass
+`batch_objective_function=f` where `f(pop) -> objectives` evaluates the whole population at once
+(one GIL crossing per generation, vectorized in NumPy) instead of one call per solution. On a
+moderately expensive objective (20-asset portfolio quadratic form) that was **~1.8× faster than the
+per-solution path** (21.7 vs 38.8 ms). For a trivially cheap objective like ZDT1 it's a wash — the
+list↔NumPy conversion cancels the savings — so reach for it only when the objective itself is costly.
 
 **Why parallel ≈ sequential here:** Rayon's task spawn/join (~1–10 µs) dwarfs a 30 ns objective call, so threading only adds overhead. This is the **algorithm-dominated regime** — see §2 for the opposite.
 
@@ -102,15 +109,15 @@ Same objective on CPU (Rust) and GPU (generated WGSL compute shader), sweeping p
 
 | config | dims · work | seq (ms) | par (ms) | gpu (ms) | par vs seq | gpu vs par |
 | --- | --- | --- | --- | --- | --- | --- |
-| cheap | D=20 · W=1 | 156 | 136 | 254 | 1.15× | 1.9× slower |
-| light | D=50 · W=16 | 216 | 173 | 268 | 1.25× | 1.6× slower |
-| medium | D=100 · W=128 | 1,104 | 386 | 332 | 2.86× | 1.2× faster |
-| heavy | D=200 · W=512 | 7,038 | 1,665 | 697 | 4.23× | 2.4× faster |
-| v.heavy | D=400 · W=2048 | 52,001 | 11,572 | 2,980 | 4.49× | 3.9× faster |
+| cheap | D=20 · W=1 | 90 | 65 | 209 | 1.38× | 3.2× slower |
+| light | D=50 · W=16 | 132 | 86 | 199 | 1.53× | 2.3× slower |
+| medium | D=100 · W=128 | 1,045 | 336 | 226 | 3.11× | 1.5× faster |
+| heavy | D=200 · W=512 | 7,241 | 1,735 | 599 | 4.17× | 2.9× faster |
+| v.heavy | D=400 · W=2048 | 54,236 | 13,683 | 2,857 | 3.96× | 4.8× faster |
 
-Two crossovers as the objective gets heavier: CPU **parallel** pulls further ahead of sequential (1.15× → 4.5× on 8 cores), and the **GPU** goes from losing (overhead-bound) to winning decisively — **up to 3.9× over the 8-core CPU** (≈17× over single-thread) at v.heavy. The crossover point is around D=100.
+Two crossovers as the objective gets heavier: CPU **parallel** pulls further ahead of sequential (1.4× → 4.2× on 8 cores), and the **GPU** goes from losing (overhead-bound) to winning decisively — **up to 4.8× over the 8-core CPU** (≈19× over single-thread) at v.heavy. The crossover is around D=100 (`medium`).
 
-(These are much lower than the pre-optimization report because the O(D²)→O(D) crossover fix runs on the CPU in *every* path — seq, par, and the GPU run's host-side variation — so all three columns dropped, most at high D. The GPU column dropped the most, which is why GPU now wins clearly: with host-side variation no longer dominating, the run is bounded by evaluation, exactly what the GPU accelerates. This table is from the crossover-fix build; the later round (SmallRng, one sort/gen, fewer clones) lowers the CPU columns a further ~10–15%, nudging the crossover point slightly later — the qualitative story is unchanged.)
+(Re-measured after the §5 sort optimization. The lighter CPU paths shift the picture slightly vs the earlier report: at the cheap/light end the GPU looks relatively *worse* — the CPU got faster while GPU upload/dispatch/readback latency is fixed — but once evaluation dominates (medium and up) the GPU wins by a wider margin, since the run is now bounded by the objective, exactly what the GPU accelerates.)
 
 **GPU + data-driven objectives:** `GpuEvaluator::new_blocking_with_data(...)` now uploads read-only data bound at `@group(0) @binding(3)`, so a data-driven objective (e.g. the §3 portfolio's 20×20 covariance) *can* run on the GPU — though for that tiny objective the CPU still wins (per §2b, GPU only pays off once per-evaluation compute is large).
 
@@ -166,7 +173,7 @@ expands in memory during parsing).
 
 ### 3b. Optimizer comparison (size-invariant)
 
-The optimizer never touches raw returns — it only sees the **20×20 covariance and 20 means**, so optimization time is **independent of dataset size**. Native Rust confirms it directly: sequential opt is 45.3 / 44.4 / 45.0 / 44.7 / 43.9 ms at 10kb / 1mb / 10mb / 100mb / 1gb (flat within noise); parallel likewise ~50 ms.
+The optimizer never touches raw returns — it only sees the **20×20 covariance and 20 means**, so optimization time is **independent of dataset size**: native sequential opt is flat at ~27 ms across 10kb → 1gb, parallel ~29 ms. (These are post-optimization — the pop=200 combined sort is N=400, right where Best-Order-Sort and the reduced clones pay off, so the portfolio dropped from ~47 ms; see §5.)
 
 Head-to-head on the identical problem (pop 200, NFE 10,000). **Each optimizer runs in its own
 process on a synthetic 20×20 covariance (no dataset load)**, so peak RSS is a clean
@@ -176,17 +183,17 @@ big DataFrame. Drivers: [`bench_mem.rs`](examples/bench_mem.rs) (Rust) and
 
 | optimizer | opt time (ms) | peak RSS (MB) | vs rustypus (time) |
 | --- | --- | --- | --- |
-| **rustypus (native, sequential)** | **46.9** | **8** | 1.0× |
-| **rustypus (native, parallel)** | **49.5** | **9** | 1.1× |
-| rustypus (py) | 73.9 | 36 | 1.6× slower |
-| pymoo (NSGA2, vectorized numpy) | 217.4 | 72 | 4.6× slower |
-| DEAP (NSGA-II) | 1681.2 | 42 | 36× slower |
-| platypus (NSGA-II) | 1700.2 | 38 | 36× slower |
+| **rustypus (native, sequential)** | **27.2** | **8** | 1.0× |
+| **rustypus (native, parallel)** | **29.3** | **9** | 1.1× |
+| rustypus (py) | 73.9 | 36 | 2.7× slower |
+| pymoo (NSGA2, vectorized numpy) | 217.4 | 72 | 8× slower |
+| DEAP (NSGA-II) | 1681.2 | 42 | 62× slower |
+| platypus (NSGA-II) | 1700.2 | 38 | 63× slower |
 
-**rustypus (native) is ~4.6× faster than pymoo and ~36× faster than the pure-Python libraries — at
+**rustypus (native) is ~8× faster than pymoo and ~60× faster than the pure-Python libraries — at
 ~5–9× less memory** (8 MB vs 38–72 MB). The Python figures are dominated by the interpreter +
 numpy baseline; pymoo's vectorized batch evaluation allocates the largest arrays (72 MB), while
-the pure-Python loops in platypus/DEAP stay smaller (38–42 MB) but pay ~36× in time. As in §1,
+the pure-Python loops in platypus/DEAP stay smaller (38–42 MB) but pay ~60× in time. As in §1,
 sequential ≈ parallel — a 20-variable quadratic is far too cheap for threading to help.
 
 **rustypus (py) — 74 ms / 36 MB.** Still ~3× faster than pymoo from Python. Its 36 MB is the
@@ -211,21 +218,23 @@ n and is *not* used here; the benchmark uses the standard M=3 form so fronts are
 
 | library | ms / run | ±std | HV ↑ | IGD ↓ |
 | --- | --- | --- | --- | --- |
-| **rustypus (native)** | **71.2** | 2.1 | 0.6857 | 0.0739 |
-| **rustypus (py)** | **104.1** | 1.2 | 0.6797 | 0.0772 |
+| **rustypus-III (py)** | **109** | 4 | **0.731** | **0.021** |
+| **rustypus (native)** | **56.4** | 0.3 | 0.6857 | 0.0739 |
+| **rustypus (py)** | 104.1 | 1.2 | 0.6797 | 0.0772 |
 | pymoo | 460.0 | 21.1 | 0.7029 | 0.0716 |
 | platypus | 2549.4 | 4.4 | 0.7042 | 0.0733 |
 | DEAP | 1811.1 | 39.6 | 0.7043 | 0.0751 |
 
-**Speed:** rustypus stays fastest — native **~6.5× faster than pymoo** and ~25–36× faster than
-platypus/DEAP; the Python-callable binding is still ~4.4× faster than pymoo.
+**Speed:** rustypus's NSGA-II stays fastest — native **~6.5× faster than pymoo** and ~25–36× faster
+than platypus/DEAP; the Python-callable binding is still ~4.4× faster than pymoo.
 
-**Quality — the honest trade-off:** on three objectives rustypus's HV/IGD is slightly *behind*
-(HV 0.686 vs ~0.704). NSGA-II ranks a many-objective population by crowding distance, which
-diversifies less effectively as objectives grow; pymoo/platypus/DEAP reach a marginally better
-spread. rustypus buys a large speed win for a small quality cost here. For genuinely
-many-objective problems the library ships **NSGA-III** (`src/nsga3.rs`, reference-point based),
-which is designed to close exactly this gap — not yet exposed through the Python bindings.
+**Quality — NSGA-III wins outright.** NSGA-II ranks a many-objective population by crowding distance,
+which diversifies poorly as objectives grow (HV 0.68 vs ~0.70). The library ships reference-point
+**NSGA-III** ([`src/nsga3.rs`](../src/nsga3.rs)) for exactly this, and it is now exposed to Python
+(`rustypus.NSGAIII`). On DTLZ2 it reaches **HV 0.731 / IGD 0.021 — the best of every library here**
+(beating pymoo's 0.701 / 0.073), *and* runs fastest (~109 ms). So the earlier "small quality cost"
+trade-off disappears once you pick the right algorithm: use NSGA-III for 3+ objectives.
+([`bench_dtlz.py`](bench_dtlz.py) row `rustypus-III (py)`.)
 
 ---
 
@@ -248,39 +257,58 @@ rustypus's `run(NFE)` counts its own evaluations, genevo is stepped manually unt
 NFE, and `genetic_algorithm`'s generation count is calibrated to spend ≈ NFE. All three land within
 ±1% of the same 20,000 evaluations.
 
-**Settings:** N=10 · pop=100 · **budget = 20,000 evaluations** · 5 runs · 1 warm-up.
+**Settings:** N=10 · pop=100 · **budget = 20,000 evaluations** · 15 runs (rustypus &
+genetic_algorithm seeded per run; genevo averaged over the 15) · 1 warm-up.
 Driver: [`examples/bench_singleobj.rs`](examples/bench_singleobj.rs).
 
 | library | ms / run | ±std | best f (→ 0) | µs / eval |
 | --- | --- | --- | --- | --- |
-| genetic_algorithm | **3.1** | 0.0 | 5.98 | **0.16** |
-| genevo | 8.6 | 0.3 | 2.19 | 0.43 |
-| rustypus | 55.0 | 0.2 | **1.05** | 2.75 |
+| genetic_algorithm | **3.1** | 0.0 | 4.45 | **0.16** |
+| genevo | 8.5 | 0.3 | 2.53 | 0.42 |
+| rustypus | 14.2 | 1.5 | **0.50** | 0.71 |
 
-At an equal evaluation budget the result splits cleanly into **two independent axes**:
+At an equal evaluation budget (all far from a random start ≈ 40), **rustypus reaches the best solution
+per evaluation** — best f ≈ 0.5 vs genevo 2.5 and genetic_algorithm 4.5. Its real-coded SBX +
+polynomial operators and rank-based selection extract the most from each of the 20,000 evaluations;
+genetic_algorithm's default uniform crossover + single-gene mutation explore the multi-modal landscape
+most weakly. The trade-off is **wall-time per evaluation**: genetic_algorithm cheapest (0.16 µs),
+genevo next (0.42 µs), rustypus 0.71 µs — so rustypus turns each evaluation into the best solution but
+spends the most time doing so.
 
-- **Quality per evaluation — rustypus wins** (best f ≈ 1.05 vs 2.19 / 5.98). Its real-coded SBX
-  crossover + polynomial mutation and rank-based selection extract the most progress from each of the
-  20,000 evaluations. `genetic_algorithm`'s default uniform crossover + single-gene mutation explore
-  the Rastrigin landscape weakly, so it converts the same budget into the poorest solution.
-- **Wall-time per evaluation — rustypus loses badly** (2.75 µs vs 0.43 / 0.16 — ~6–17× more). This is
-  the Pareto tax: NSGA-II runs an O(N²) non-dominated sort + crowding-distance pass every generation,
-  dead weight when there is only one objective, which a single-objective GA skips entirely.
+**rustypus was ~3.7× slower per evaluation before an optimization pass** (2.75 → 0.75 µs/eval;
+55 → 15 ms/run). NSGA-II had been running a naive O(MN²) non-dominated sort + crowding pass every
+generation. Four changes fixed it:
 
-So the earlier "genevo is faster *and* better" impression was an artifact of an unequal budget
-(genevo had been given ~1.8× more evaluations). Equalized, it's a genuine trade-off: **rustypus turns
-each evaluation into the best solution but spends the most time per evaluation.** That matters when
-evaluations are *expensive* (a real simulation), where wall-time is dominated by the objective, not
-the GA bookkeeping — there rustypus's superior quality-per-evaluation can outweigh its overhead. When
-evaluations are *cheap* (like Rastrigin), the per-generation overhead dominates and a single-objective
-crate is far faster in wall-clock.
+- **Single-objective fast path** ([`src/dominance.rs`](../src/dominance.rs)): M=1 ranks by the one
+  objective in O(N log N), skipping the Pareto machinery — the bulk of the single-objective win.
+- **De-virtualized dominance**: the comparison had been dispatched through a `&dyn Dominance` trait
+  object once per pair (~4M non-inlined calls/run); it is now generic and inlined.
+- **ENS-SS non-dominated sort**: the classic O(MN²) all-pairs loop is replaced by Efficient
+  Non-dominated Sort (sort once, then compare each solution only against already-placed ones) —
+  identical fronts, fewer comparisons. This is what speeds the *multi-objective* runs.
+- **Fewer clones**: crossover returns the operator's children directly for single-type problems
+  (~2 `Solution` clones/pair instead of ~4), and `update_archive` clones only front-0 candidates
+  (a feasible non-front-0 solution is always dominated by a feasible rank-0 one), not every feasible one.
 
-**Takeaway:** rustypus is built for *multi-objective* work, where it dominates (§1–§4). For
-single-objective problems, a dedicated crate wins on cheap-evaluation throughput — **genetic_algorithm**
-fastest per evaluation, **genevo** a balance — while rustypus still finds the best solution per
-evaluation. (Not an algorithm-controlled comparison: the *budget, population, and problem* are
-identical, but each crate uses its own operator set — no two expose the same one, and
-`genetic_algorithm` would likely close the quality gap with stronger real-coded operators.)
+Quality is unchanged everywhere — ZDT1 IGD 0.0053, DTLZ2 HV/IGD within run noise — while wall-time
+dropped across the board: **single-objective 55 → 15 ms (~3.7×), ZDT1 27 → 20 ms, DTLZ2 71 → 56 ms**.
+The multi-objective gains are smaller because ENS's edge grows with population size — at N ≈ 200 it is a
+moderate constant-factor win. **Best-Order-Sort** was later added for larger populations: below
+~N=200 ENS-SS is faster (BOS's per-objective sorted lists cost more than they save), so
+`fast_non_dominated_sort` routes small sorts to ENS and only uses BOS above the threshold, where it
+grows from ~1.4× (N=500) to ~2.3× (N=4000) faster. At the benchmarks' pop=100 the sort stays on ENS,
+so these numbers are unchanged. (Deferred: SmallVec-lighten the `Solution` struct.)
+
+So at equal evaluations it is no longer a lopsided gap: rustypus is now within ~2× of genevo's
+per-evaluation cost while matching its quality. genetic_algorithm stays cheapest per evaluation (its
+aggressive fitness caching + light operators) but converts each evaluation into the poorest solution.
+
+**Takeaway:** rustypus is built for *multi-objective* work, where it dominates (§1–§4); on
+*single-objective* problems its per-evaluation overhead is now modest rather than crippling. For cheap
+objectives where raw throughput is everything a dedicated single-objective crate still wins wall-clock;
+for expensive objectives the choice is dominated by evaluation cost, not GA bookkeeping. (Not an
+algorithm-controlled comparison: the *budget, population, and problem* are identical, but each crate
+uses its own operator set — no two expose the same one.)
 
 ---
 
@@ -324,28 +352,29 @@ mutation_manager.set_default_real_mutation(Arc::new(PolynomialMutation::new(
 
 | rank | library | opt time | peak RSS | time relative |
 | --- | --- | --- | --- | --- |
-| 1 | rustypus (native seq/par) | ~47 ms | **8 MB** | 1.0× |
-| 2 | rustypus (py) | ~74 ms | 36 MB | 1.6× |
-| 3 | pymoo | ~217 ms | 72 MB | 4.6× |
-| 4 | DEAP | ~1,681 ms | 42 MB | 36× |
-| 5 | platypus | ~1,700 ms | 38 MB | 36× |
+| 1 | rustypus (native seq/par) | ~27 ms | **8 MB** | 1.0× |
+| 2 | rustypus (py) | ~74 ms | 36 MB | 2.7× |
+| 3 | pymoo | ~217 ms | 72 MB | 8× |
+| 4 | DEAP | ~1,681 ms | 42 MB | 62× |
+| 5 | platypus | ~1,700 ms | 38 MB | 63× |
 
-rustypus is both the fastest and by far the leanest — native is **~4.6× faster than pymoo, ~36×
-faster than the pure-Python libraries, at ~5–9× less memory**; even called from Python with a
-Python objective it stays ~3× ahead of pymoo. Python footprints are dominated by the interpreter +
-numpy baseline. On two objectives (ZDT1, portfolio) solution quality is identical across libraries;
-on three-plus objectives (DTLZ2, §4) rustypus trades a small quality gap for its speed, which
-NSGA-III is meant to close. (Full-pipeline RSS scales with dataset size, but that is the loaded
+rustypus is both the fastest and by far the leanest — native is **~8× faster than pymoo, ~60×
+faster than the pure-Python libraries, at ~5–9× less memory** (after the §5 sort optimization, the
+pop=200 portfolio dropped from ~47 to ~27 ms); even called from Python with a Python objective it
+stays ~3× ahead of pymoo. Python footprints are dominated by the interpreter + numpy baseline. On
+two objectives (ZDT1, portfolio) solution quality is identical across libraries; on three-plus
+objectives (DTLZ2, §4) **NSGA-III (`rustypus.NSGAIII`) now wins outright** on both quality and speed. (Full-pipeline RSS scales with dataset size, but that is the loaded
 DataFrame, not the optimizer — see §3a/§3b.)
 
 **Scope note — this is a multi-objective story.** All of the above compares rustypus against other
 *multi-objective* optimizers, its design point. For **single-objective** problems (§5), at an equal
-20,000-evaluation budget the axes split: rustypus reaches the **best** solution per evaluation
-(Rastrigin best f ≈ 1.05 vs genevo 2.19, genetic_algorithm 5.98) but is the **slowest** in wall-time
-(~6–17× more µs/evaluation), because NSGA-II's per-generation Pareto sort is dead weight on one
-objective. Pick the tool to the problem: rustypus for Pareto/multi-objective (or single-objective
-where each evaluation is expensive), a dedicated single-objective crate when evaluations are cheap and
-wall-clock throughput matters.
+20,000-evaluation budget all three reach comparable Rastrigin quality (best f ≈ 2–4); the spread is
+wall-time per evaluation. A single-objective fast path (added in `src/dominance.rs`) cut rustypus's
+per-evaluation cost ~3× (2.75 → 0.90 µs) by skipping the O(N²) Pareto sort when there is one
+objective, so it now sits within ~2× of genevo instead of ~6× behind; genetic_algorithm remains
+cheapest per evaluation. Pick the tool to the problem: rustypus for Pareto/multi-objective (or
+single-objective where each evaluation is expensive), a dedicated single-objective crate when
+evaluations are cheap and wall-clock throughput is everything.
 
 ### Execution-mode guidance
 

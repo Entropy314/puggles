@@ -82,6 +82,24 @@ def bench_rustypus_py():
     return summarize(times, hvs, igds)
 
 
+def bench_rustypus_py_nsga3():
+    import rustypus as rp
+
+    times, hvs, igds = [], [], []
+    for _ in range(RUNS):
+        p = rp.Problem(
+            solution_length=N, number_of_objectives=M,
+            solution_data_types=[rp.Real(0.0, 1.0)] * N,
+            objective_function=lambda x: dtlz2(x), direction=[-1] * M,
+        )
+        # NSGA-III: reference-point method, divisions=12 → 91 points for M=3.
+        ga = rp.NSGAIII(p, population_size=POP, divisions=12, execution_mode="sequential")
+        t0 = time.perf_counter(); ga.run(NFE); times.append((time.perf_counter() - t0) * 1000)
+        front = [[s.objectives[k] for k in range(M)] for s in ga.get_archive()]
+        hv, igd = score(front); hvs.append(hv); igds.append(igd)
+    return summarize(times, hvs, igds)
+
+
 def bench_pymoo():
     from pymoo.algorithms.moo.nsga2 import NSGA2
     from pymoo.core.problem import Problem as _P
@@ -188,6 +206,7 @@ def bench_native_rust():
 BENCHMARKS = [
     ("rustypus (native)", bench_native_rust),
     ("rustypus (py)", bench_rustypus_py),
+    ("rustypus-III (py)", bench_rustypus_py_nsga3),
     ("pymoo", bench_pymoo),
     ("platypus", bench_platypus),
     ("DEAP", bench_deap),
