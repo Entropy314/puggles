@@ -3,6 +3,7 @@ use pyo3::prelude::*;
 mod py_benchmarks;
 #[cfg(feature = "gpu")]
 mod py_gpu;
+mod py_nsga3;
 mod py_nsgaii;
 mod py_operators;
 mod py_problem;
@@ -18,6 +19,7 @@ fn rustypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<py_problem::PyProblem>()?;
     m.add_class::<py_solution::PySolution>()?;
     m.add_class::<py_nsgaii::PyNSGAII>()?;
+    m.add_class::<py_nsga3::PyNSGAIII>()?;
     #[cfg(feature = "gpu")]
     m.add_class::<py_gpu::PyGpuProblem>()?;
 

@@ -81,6 +81,21 @@ class NSGAII:
     def get_archive(self) -> List[Solution]: ...
     def get_population(self) -> List[Solution]: ...
 
+class NSGAIII:
+    """Reference-point many-objective GA. Prefer over NSGAII for 3+ objectives.
+    Does not support a batch objective (use NSGAII for that)."""
+    nfe: int
+    def __init__(
+        self,
+        problem: Problem,
+        population_size: int = 0,
+        divisions: int = 12,
+        execution_mode: str = "sequential",
+    ) -> None: ...
+    def run(self, max_nfe: int) -> None: ...
+    def get_archive(self) -> List[Solution]: ...
+    def get_population(self) -> List[Solution]: ...
+
 class CrossoverConfig:
     real_crossover: str
     integer_crossover: str

@@ -33,8 +33,8 @@ impl PySolution {
     pub fn from_core_solution(sol: &Solution) -> Self {
         PySolution {
             variables: sol.solution.clone(),
-            objectives: sol.objective_fitness_values.clone(),
-            constraints: sol.constraint_values.clone(),
+            objectives: sol.objective_fitness_values.to_vec(),
+            constraints: sol.constraint_values.to_vec(),
             evaluated: sol.evaluated,
             feasible: sol.feasible,
             constraint_violation: sol.constraint_violation,

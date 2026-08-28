@@ -24,14 +24,14 @@ use crate::py_solution::PySolution;
 // clone the Arc out of the problem object — no lifetimes, no raw pointers.
 // ---------------------------------------------------------------------------
 
-struct StoreData {
-    problem: Arc<Problem>,
-    problem_id: u64,
-    uses_python_callable: bool,
-    uses_batch_callable: bool,
+pub(crate) struct StoreData {
+    pub(crate) problem: Arc<Problem>,
+    pub(crate) problem_id: u64,
+    pub(crate) uses_python_callable: bool,
+    pub(crate) uses_batch_callable: bool,
 }
 
-fn extract_store(py: Python<'_>, obj: &PyObject) -> PyResult<StoreData> {
+pub(crate) fn extract_store(py: Python<'_>, obj: &PyObject) -> PyResult<StoreData> {
     if let Ok(p) = obj.extract::<Py<PyProblem>>(py) {
         let b = p.borrow(py);
         return Ok(StoreData {
