@@ -1,8 +1,8 @@
-# rustypus — User Guide
+# puggles — User Guide
 
-rustypus is a Rust implementation of NSGA-II (Non-dominated Sorting Genetic Algorithm II). It handles single- and multi-objective optimization over continuous, integer, and binary decision variables, with optional constraint handling, parallel evaluation (Rayon), and optional GPU acceleration.
+puggles is a Rust implementation of NSGA-II (Non-dominated Sorting Genetic Algorithm II). It handles single- and multi-objective optimization over continuous, integer, and binary decision variables, with optional constraint handling, parallel evaluation (Rayon), and optional GPU acceleration.
 
-> **Python bindings** are temporarily removed and will be reimplemented in a later PR. This guide covers the Rust library.
+> This guide covers the Rust library. The Python bindings live in `python/` — build them with `cd python && maturin develop --release`.
 
 ---
 
@@ -34,13 +34,13 @@ Not published to crates.io. Depend on it by path or git in your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rustypus = { path = "path/to/rustypus" }
+puggles = { path = "path/to/puggles" }
 ```
 
 GPU evaluation is behind an optional feature (adds `wgpu` + `pollster`):
 
 ```toml
-rustypus = { path = "path/to/rustypus", features = ["gpu"] }
+puggles = { path = "path/to/puggles", features = ["gpu"] }
 ```
 
 Requires a recent stable Rust toolchain (the `gpu` feature needs a wgpu-compatible driver at runtime).
@@ -58,7 +58,7 @@ Requires a recent stable Rust toolchain (the `gpu` feature needs a wgpu-compatib
 
 **Directions:** `-1` = minimize, `1` = maximize, one per objective. `Problem::new` defaults `None` to minimize all.
 
-**Variable types** (`rustypus::gatypes`):
+**Variable types** (`puggles::gatypes`):
 - `Real::new(lower, upper)` — continuous float in `[lower, upper)`
 - `Integer::new(lower, upper)` — integer in `[lower, upper)`
 - `BitBinary::new()` — 0 or 1
@@ -71,9 +71,9 @@ Bounds are `Option`: `None` means unbounded (`f64::MIN`/`MAX` or `i64::MIN`/`MAX
 
 ```rust
 use std::sync::Arc;
-use rustypus::core::Problem;
-use rustypus::gatypes::{Real, SolutionDataTypes};
-use rustypus::genetic_algorithms_v2::{ExecutionMode, NSGAII};
+use puggles::core::Problem;
+use puggles::gatypes::{Real, SolutionDataTypes};
+use puggles::genetic_algorithms_v2::{ExecutionMode, NSGAII};
 
 fn sphere(x: &Vec<f64>) -> Vec<f64> {
     vec![x.iter().map(|xi| xi * xi).sum()] // one objective: minimize sum of squares
@@ -183,7 +183,7 @@ Constraint-based dominance: a feasible solution dominates any infeasible one; am
 Mix `Real`, `Integer`, and `BitBinary` in one problem — each operator adapts to the variable type.
 
 ```rust
-use rustypus::gatypes::{BitBinary, Integer, Real, SolutionDataTypes};
+use puggles::gatypes::{BitBinary, Integer, Real, SolutionDataTypes};
 
 fn mixed(x: &Vec<f64>) -> Vec<f64> {
     let binary_penalty = 5.0 * (1.0 - x[0]); // prefer x[0] = 1
@@ -215,7 +215,7 @@ Default operators by type:
 When the objective is expensive, evaluate the whole unevaluated set in one call. Use the `Problem` struct literal with `EvalFn::Batch` (the positional `Problem::new` only builds `EvalFn::Single`):
 
 ```rust
-use rustypus::core::{EvalFn, Problem};
+use puggles::core::{EvalFn, Problem};
 
 fn batch_sphere(inputs: &Vec<Vec<f64>>) -> Vec<Vec<f64>> {
     inputs.iter()
@@ -241,7 +241,7 @@ The batch closure is called once per generation with all unevaluated solutions a
 [`benchmark_objective_functions`](src/benchmark_objective_functions.rs) provides ready objectives with the `fn(&Vec<f64>) -> Vec<f64>` signature: `parabloid_5`, `parabloid_5_loc`, `parabloid_hyper_5`, `simple_objective`, `xyz_objective`, and `dtlz1`–`dtlz7`.
 
 ```rust
-use rustypus::benchmark_objective_functions::dtlz2;
+use puggles::benchmark_objective_functions::dtlz2;
 
 let problem = Arc::new(Problem::new(
     12, 3, None, None, Some(vec![-1; 3]),
@@ -260,8 +260,8 @@ ga.run(50_000);
 
 ```rust
 use std::sync::Arc;
-use rustypus::genetic_operators::crossover::DifferentialEvolutionCrossover;
-use rustypus::genetic_operators::mutation::PolynomialMutation;
+use puggles::genetic_operators::crossover::DifferentialEvolutionCrossover;
+use puggles::genetic_operators::mutation::PolynomialMutation;
 
 let mut ga = NSGAII::new(Arc::clone(&problem), 100, ExecutionMode::MultiThreaded);
 
@@ -286,19 +286,23 @@ ga.run(30_000);
 | `BlendCrossover` | Real | `{ probability, alpha }` |
 | `UnimodalDistributionCrossover` | Real | `{ probability, distribution_index, nparents, zeta, eta }` |
 | `ParentCentricCrossover` | Real, Integer | `{ nparents, noffspring, eta, zeta }` |
-| `UniformCrossover` | Integer, BitBinary | `{ probability }` — default for Integer/BitBinary |
-| `ArithmeticCrossover` | Integer | `{ probability }` |
+| `UniformCrossover` | Integer, BitBinary | `{ probability }` — per-gene **swap** probability; default for Integer/BitBinary at 0.5. Setting it to 1.0 swaps every gene, which merely exchanges the parents. |
+| `ArithmeticCrossover` | Real, Integer | `{ probability }` — per-gene blend `a*p1+(1-a)*p2` with random `a`; the two children are complements |
 
 **Mutation operators** (`genetic_operators::mutation`):
 
 | Type | Applies to | Constructor |
 |---|---|---|
-| `UniformMutation` | Real, Integer | `::default()` or `{ probability }` — default for Real/Integer |
-| `PolynomialMutation` | Real, Integer | `::new(probability, distribution_index)` |
-| `GaussianMutation` | Real | `::new(probability, standard_deviation)` |
-| `BitFlipMutation` | BitBinary | `::default()` or `{ probability }` — default for BitBinary |
+| `UniformMutation` | Real, Integer | `::default()` or `{ probability }` — resamples a gene uniformly; use a rate near `1/n`, never 1.0 |
+| `PolynomialMutation` | Real, Integer | `::new(probability, distribution_index)` — **default for Real/Integer** at `1/n`, eta=20 |
+| `GaussianMutation` | Real, Integer | `::new(probability, standard_deviation)` — symmetric normal perturbation (Box-Muller) |
+| `BitFlipMutation` | BitBinary | `::default()` or `{ probability }` — **default for BitBinary** at `1/n` |
 
 `::new` constructors take `Option<f64>` arguments (`None` uses the documented default).
+
+`MutationManager::new(solution_length)` installs all three defaults at the conventional `1/n`
+per-gene rate. A rate of 1.0 replaces the whole genome every generation — that is random search,
+not evolution — so override the rate only if you know why.
 
 ### 8. Per-Generation Inspection & Early Stop
 
@@ -356,7 +360,7 @@ rayon::ThreadPoolBuilder::new().num_threads(8).build_global().unwrap();
 Build with `--features gpu`. Supply a WGSL compute shader (bindings documented at the top of [src/gpu_evaluator.rs](src/gpu_evaluator.rs)), construct a `GpuEvaluator`, and attach it:
 
 ```rust
-use rustypus::gpu_evaluator::GpuEvaluator;
+use puggles::gpu_evaluator::GpuEvaluator;
 
 let evaluator = GpuEvaluator::new_blocking(shader_wgsl, solution_length, num_objectives);
 let mut ga = NSGAII::new(Arc::clone(&problem), 200, ExecutionMode::GPU)
@@ -364,7 +368,7 @@ let mut ga = NSGAII::new(Arc::clone(&problem), 200, ExecutionMode::GPU)
 ga.run(50_000);
 ```
 
-- `new_blocking` panics if no GPU adapter is available, and prints the selected adapter to stderr (`rustypus: GPU = <name> (<type>, <backend>)`) — a reliable confirmation a real device is in use.
+- `new_blocking` panics if no GPU adapter is available, and prints the selected adapter to stderr (`puggles: GPU = <name> (<type>, <backend>)`) — a reliable confirmation a real device is in use.
 - GPU applies only to `EvalFn::Single` problems; batch problems always run their closure on the CPU.
 - Objective values are computed in `f32` on the GPU and returned as `f64`.
 
@@ -372,10 +376,10 @@ ga.run(50_000);
 
 ## Dominance & Sorting
 
-The default and only built-in comparator is **Pareto dominance**. The sorting primitives are public in [`rustypus::dominance`](src/dominance.rs):
+The default and only built-in comparator is **Pareto dominance**. The sorting primitives are public in [`puggles::dominance`](src/dominance.rs):
 
 ```rust
-use rustypus::dominance::{ParetoDominance, fast_non_dominated_sort, crowding_distance};
+use puggles::dominance::{ParetoDominance, fast_non_dominated_sort, crowding_distance};
 
 // Fronts as indices into `population`; front 0 is the Pareto-optimal set.
 let fronts: Vec<Vec<usize>> = fast_non_dominated_sort(&population, &ParetoDominance);

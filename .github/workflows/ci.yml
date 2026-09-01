@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [master, python-library]
+  pull_request:
+  workflow_call: # so release.yml can gate publishing on a green run
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --all-targets
+      - name: Test
+        run: cargo test --all-targets
+      # The GPU feature is compile-checked only: CI runners have no usable adapter.
+      - name: Check GPU feature
+        run: cargo check --features gpu --all-targets
+      - name: Clippy
+        run: cargo clippy --all-targets
+
+  python:
+    name: python bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build and install
+        run: pip install maturin && maturin build --release --manifest-path python/Cargo.toml --out dist && pip install --find-links dist puggles
+      - name: Smoke test
+        run: |
+          python - <<'SMOKE'
+          import puggles as pg
+
+          problem = pg.Problem(
+              solution_length=10,
+              number_of_objectives=2,
+              solution_data_types=[pg.Real(0.0, 1.0)] * 10,
+              objective_function=lambda x: [x[0], 1.0 - x[0]],
+              direction=[-1, -1],
+          )
+          ga = pg.NSGAII(problem, population_size=50, execution_mode="sequential")
+          ga.run(2000)
+          assert ga.get_archive(), "empty archive"
+          print("ok", ga.nfe, len(ga.get_archive()))
+          SMOKE

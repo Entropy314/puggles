@@ -8,7 +8,7 @@ use crate::core::Solution;
 
 /// Collect the objective vectors of a slice of solutions.
 pub fn objective_vectors(solutions: &[Solution]) -> Vec<Vec<f64>> {
-    solutions.iter().map(|s| s.objective_fitness_values.clone()).collect()
+    solutions.iter().map(|s| s.objective_fitness_values.to_vec()).collect()
 }
 
 /// Exact 2-objective hypervolume (dominated area) relative to a reference (nadir) point,

@@ -2,9 +2,27 @@
 members = ["."]
 
 [package]
-name = "rustypus"
+name = "puggles"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.74"
+description = "Multi-objective evolutionary optimization: NSGA-II and NSGA-III over continuous, integer, and binary variables, with constraint handling, Rayon parallelism, and optional GPU evaluation."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Entropy314/puggles"
+documentation = "https://docs.rs/puggles"
+readme = "README.md"
+keywords = ["genetic-algorithm", "optimization", "nsga2", "multi-objective", "evolutionary"]
+categories = ["algorithms", "science", "mathematics"]
+exclude = [
+    "graphify-out/",
+    "sandbox/",
+    ".idea/",
+    ".vscode/",
+    "OPTIMIZATION_PLAN.md",
+]
+
+[package.metadata.docs.rs]
+all-features = true
 
 [features]
 gpu = ["dep:wgpu", "dep:pollster"]
@@ -13,6 +31,7 @@ gpu = ["dep:wgpu", "dep:pollster"]
 rand = { version = "0.8.5", features = ["small_rng"] }
 rayon = "1.10.0"
 serde = { version = "1", features = ["derive"] }
+smallvec = "1"
 wgpu = { version = "22", optional = true }
 pollster = { version = "0.3", optional = true }
 

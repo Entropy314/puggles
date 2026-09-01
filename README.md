@@ -1,8 +1,8 @@
-# rustypus
+# puggles
 
 A multi-objective evolutionary optimization library written in Rust. Implements NSGA-II (Non-dominated Sorting Genetic Algorithm II) for solving single- and multi-objective optimization problems over continuous, integer, and binary decision variables, with optional constraint handling, parallel (Rayon) evaluation, and optional GPU acceleration.
 
-> **Python bindings:** temporarily removed. They are being reimplemented in a later PR. This branch is Rust-only.
+> **Python bindings:** in `python/`. Build with `cd python && maturin develop --release`.
 >
 > **Full documentation:** see [GUIDE.md](GUIDE.md) for walkthroughs, the complete API, and configuration reference.
 
@@ -14,9 +14,9 @@ Not published to crates.io yet — depend on it by path or git:
 
 ```toml
 [dependencies]
-rustypus = { path = "path/to/rustypus" }
+puggles = { path = "path/to/puggles" }
 # GPU evaluation is optional and off by default:
-# rustypus = { path = "path/to/rustypus", features = ["gpu"] }
+# puggles = { path = "path/to/puggles", features = ["gpu"] }
 ```
 
 ---
@@ -25,9 +25,9 @@ rustypus = { path = "path/to/rustypus" }
 
 ```rust
 use std::sync::Arc;
-use rustypus::core::Problem;
-use rustypus::gatypes::{Real, SolutionDataTypes};
-use rustypus::genetic_algorithms_v2::{ExecutionMode, NSGAII};
+use puggles::core::Problem;
+use puggles::gatypes::{Real, SolutionDataTypes};
+use puggles::genetic_algorithms_v2::{ExecutionMode, NSGAII};
 
 // Objective: minimize two conflicting functions. Returns one value per objective.
 fn objectives(x: &Vec<f64>) -> Vec<f64> {
@@ -66,7 +66,7 @@ fn main() {
 ## Variable types
 
 ```rust
-use rustypus::gatypes::{Real, Integer, BitBinary, SolutionDataTypes};
+use puggles::gatypes::{Real, Integer, BitBinary, SolutionDataTypes};
 
 SolutionDataTypes::Real(Real::new(Some(-10.0), Some(10.0)))  // continuous float in [-10, 10)
 SolutionDataTypes::Integer(Integer::new(Some(-100), Some(100))) // integer in [-100, 100)
@@ -125,7 +125,7 @@ Build with `--features gpu` and attach a `GpuEvaluator` backed by a WGSL compute
 
 ```rust
 # // requires: features = ["gpu"]
-use rustypus::gpu_evaluator::GpuEvaluator;
+use puggles::gpu_evaluator::GpuEvaluator;
 
 let evaluator = GpuEvaluator::new_blocking(shader_wgsl, solution_length, num_objectives);
 let mut ga = NSGAII::new(problem, 200, ExecutionMode::GPU)
@@ -133,7 +133,7 @@ let mut ga = NSGAII::new(problem, 200, ExecutionMode::GPU)
 ga.run(50_000);
 ```
 
-On construction the evaluator prints the selected adapter to stderr (`rustypus: GPU = ...`), so you can confirm a real device is in use. GPU applies only to single-objective-function problems (`EvalFn::Single`); batch problems always run their batch closure on the CPU.
+On construction the evaluator prints the selected adapter to stderr (`puggles: GPU = ...`), so you can confirm a real device is in use. GPU applies only to single-objective-function problems (`EvalFn::Single`); batch problems always run their batch closure on the CPU.
 
 ---
 
@@ -142,7 +142,7 @@ On construction the evaluator prints the selected adapter to stderr (`rustypus: 
 [`benchmark_objective_functions`](src/benchmark_objective_functions.rs) ships standard test functions usable directly as objectives: `parabloid_5`, `parabloid_5_loc`, `parabloid_hyper_5`, `simple_objective`, `xyz_objective`, and `dtlz1`–`dtlz7` (note `dtlz4` takes an extra `alpha` argument, so wrap it in a closure to use as an objective).
 
 ```rust
-use rustypus::benchmark_objective_functions::dtlz2;
+use puggles::benchmark_objective_functions::dtlz2;
 let problem = Arc::new(Problem::new(12, 3, None, None, Some(vec![-1; 3]),
     types, dtlz2));
 ```

@@ -1,0 +1,24 @@
+# Own workspace so this cdylib is isolated from the root puggles rlib workspace
+# (mirrors sandbox/Cargo.toml). maturin builds from here.
+[workspace]
+
+[package]
+name = "puggles-python"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "puggles"
+crate-type = ["cdylib"]
+
+[features]
+gpu = ["puggles/gpu"]
+
+[dependencies]
+puggles = { path = "..", version = "0.1.0" }
+pyo3 = { version = "0.25", features = ["extension-module", "abi3-py39"] }
+rayon = "1.10.0"
+
+[profile.release]
+lto = true
+codegen-units = 1
