@@ -7,6 +7,12 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      targets:
+        description: "Which registries to publish to"
+        type: choice
+        default: pypi
+        options: [pypi, crates-io, both]
 
 permissions:
   contents: read
@@ -18,6 +24,8 @@ jobs:
 
   crates-io:
     needs: test
+    # A tag publishes everywhere; a manual run publishes only what you picked.
+    if: github.event_name == 'push' || contains(fromJSON('["crates-io","both"]'), inputs.targets)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,6 +34,7 @@ jobs:
 
   wheels:
     needs: test
+    if: github.event_name == 'push' || contains(fromJSON('["pypi","both"]'), inputs.targets)
     name: wheels (${{ matrix.platform.target }} on ${{ matrix.platform.os }})
     runs-on: ${{ matrix.platform.os }}
     strategy:
@@ -55,6 +64,7 @@ jobs:
 
   sdist:
     needs: test
+    if: github.event_name == 'push' || contains(fromJSON('["pypi","both"]'), inputs.targets)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

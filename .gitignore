@@ -7,7 +7,7 @@ target/
 .vscode/settings.json
 .vscode/settings.json
 .venv/
-# *.ipynb
+*.ipynb
 .ipynb_checkpoints/
 .claude/*
 

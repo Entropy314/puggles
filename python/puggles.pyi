@@ -1,5 +1,7 @@
 from typing import Callable, List, Optional, Union
 
+__version__: str
+
 class Real:
     lower_bound: float
     upper_bound: float

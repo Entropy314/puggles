@@ -12,6 +12,9 @@ mod py_types;
 
 #[pymodule]
 fn puggles(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Kept in step with Cargo.toml automatically, so it can never drift from the wheel.
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+
     // Core types
     m.add_class::<py_types::PyReal>()?;
     m.add_class::<py_types::PyInteger>()?;
