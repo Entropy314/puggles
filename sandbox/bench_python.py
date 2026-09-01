@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-bench_python.py  —  ZDT1 NSGA-II comparison: Platypus / pymoo / DEAP / rustypus-python
+bench_python.py  —  ZDT1 NSGA-II comparison: Platypus / pymoo / DEAP / puggles-python
 
 Install Python libraries:
     pip install platypus-opt pymoo deap
 
-For rustypus Python bindings, cd to python/ and run:
+For puggles Python bindings, cd to python/ and run:
     maturin develop --release
 
 Run:
@@ -55,14 +55,14 @@ def igd(points):
 
 # ── Benchmark runners ─────────────────────────────────────────────────────────
 
-def bench_rustypus_py(mode="sequential"):
+def bench_puggles_py(mode="sequential"):
     """
-    rustypus Python bindings.
+    puggles Python bindings.
     Note: every objective call crosses the FFI boundary and re-acquires the GIL,
     so this measures FFI + GIL overhead, not raw Rust speed.
     Install:  cd python/ && maturin develop --release
     """
-    import rustypus as rp
+    import puggles as rp
 
     times, igds = [], []
     for _ in range(RUNS):
@@ -81,14 +81,14 @@ def bench_rustypus_py(mode="sequential"):
     return times, igds
 
 
-def bench_rustypus_py_batch():
+def bench_puggles_py_batch():
     """
-    rustypus with a BATCH objective: the GA calls one vectorized function per generation
+    puggles with a BATCH objective: the GA calls one vectorized function per generation
     (whole population at once) instead of one Python call per solution — so the GIL is
     crossed ~POP× less often. The batch fn evaluates all solutions with NumPy.
     """
     import numpy as np
-    import rustypus as rp
+    import puggles as rp
 
     def zdt1_batch(pop):
         X = np.asarray(pop, dtype=float)  # (P, N)
@@ -227,10 +227,10 @@ def bench_deap():
 # ── Output formatting ─────────────────────────────────────────────────────────
 
 # Note: a Python-callable objective always runs Sequential (the GIL serialises
-# every eval; "multithreaded" would only deadlock), so a single rustypus (py) row.
+# every eval; "multithreaded" would only deadlock), so a single puggles (py) row.
 BENCHMARKS = [
-    ("rustypus (py)",             lambda: bench_rustypus_py("sequential")),
-    ("rustypus (py, batch)",      bench_rustypus_py_batch),
+    ("puggles (py)",             lambda: bench_puggles_py("sequential")),
+    ("puggles (py, batch)",      bench_puggles_py_batch),
     ("pymoo",                     bench_pymoo),
     ("platypus",                  bench_platypus),
     ("DEAP",                      bench_deap),

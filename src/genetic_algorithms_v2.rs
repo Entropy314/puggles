@@ -454,7 +454,7 @@ impl NSGAII {
                 return;
             } else {
                 eprintln!(
-                    "rustypus warning: ExecutionMode::GPU selected but no GpuEvaluator attached. \
+                    "puggles warning: ExecutionMode::GPU selected but no GpuEvaluator attached. \
                      Falling back to MultiThreaded. Use NSGAII::with_gpu_evaluator() to enable GPU."
                 );
             }

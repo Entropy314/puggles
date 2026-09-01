@@ -1,12 +1,12 @@
 use pyo3::prelude::*;
-use rustypus::core::Problem;
-use rustypus::genetic_algorithms_v2::{ExecutionMode, NSGAII};
-use rustypus::genetic_operators::crossover::{
+use puggles::core::Problem;
+use puggles::genetic_algorithms_v2::{ExecutionMode, NSGAII};
+use puggles::genetic_operators::crossover::{
     ArithmeticCrossover, BlendCrossover, Crossover, CrossoverManager,
     DifferentialEvolutionCrossover, ParentCentricCrossover, SimulatedBinaryCrossover,
     UnimodalDistributionCrossover, UniformCrossover,
 };
-use rustypus::genetic_operators::mutation::{
+use puggles::genetic_operators::mutation::{
     BitFlipMutation, GaussianMutation, Mutation, MutationManager, PolynomialMutation,
     UniformMutation,
 };

@@ -6,7 +6,7 @@ For each dataset (1 MB, 10 MB, 100 MB):
   1. Load CSV once with polars-py (fastest Python loader)
   2. Compute covariance matrix once with numpy BLAS
   3. Time each optimizer independently on the identical 20-asset problem:
-       rustypus (py/seq)  rustypus (py/par)  pymoo  platypus  DEAP
+       puggles (py/seq)  puggles (py/par)  pymoo  platypus  DEAP
 
 Run:  python3 bench_large_data_python.py
 """
@@ -164,8 +164,8 @@ def _portfolio(w_raw, means, cov):
 
 # ── Optimizers ────────────────────────────────────────────────────────────────
 
-def bench_rustypus(means, cov, mode="sequential"):
-    import rustypus as rp
+def bench_puggles(means, cov, mode="sequential"):
+    import puggles as rp
 
     def obj(x):
         var, neg_ret = _portfolio(x, means, cov)
@@ -288,8 +288,8 @@ def bench_deap(means, cov):
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 OPTIMIZERS = [
-    ("rustypus (py/seq)", lambda m, c: bench_rustypus(m, c, "sequential")),
-    ("rustypus (py/par)", lambda m, c: bench_rustypus(m, c, "multithreaded")),
+    ("puggles (py/seq)", lambda m, c: bench_puggles(m, c, "sequential")),
+    ("puggles (py/par)", lambda m, c: bench_puggles(m, c, "multithreaded")),
     ("pymoo",             bench_pymoo),
     ("platypus",          bench_platypus),
     ("DEAP",              bench_deap),
@@ -340,8 +340,8 @@ for label, path in DATASETS:
         rd = rust_data[size_key]
         r_preproc = rd["load_ms"] + rd["cov_ms"]
         for rname, ropt, rmem in [
-            ("rustypus (native/seq) †", rd["seq_ms"], rd.get("seq_mb", float("nan"))),
-            ("rustypus (native/par) †", rd["par_ms"], rd.get("par_mb", float("nan"))),
+            ("puggles (native/seq) †", rd["seq_ms"], rd.get("seq_mb", float("nan"))),
+            ("puggles (native/par) †", rd["par_ms"], rd.get("par_mb", float("nan"))),
         ]:
             rtotal = r_preproc + ropt
             mem_s  = f"{rmem:.0f}" if rmem == rmem else "—"
@@ -394,4 +394,4 @@ for label, n_rows, t_pl, t_pd, t_cov, _ in all_results:
 
 print(f"\n# polars-py {pl.__version__}  numpy {np.__version__}")
 print("# total = polars-py load + numpy cov + opt")
-print("# native Rust numbers (polars-Rust load + serial cov + rustypus) in bench_large_data.rs output")
+print("# native Rust numbers (polars-Rust load + serial cov + puggles) in bench_large_data.rs output")

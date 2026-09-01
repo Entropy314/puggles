@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
-use rustypus::core::{EvalFn, Problem};
-use rustypus::gatypes::SolutionDataTypes;
+use puggles::core::{EvalFn, Problem};
+use puggles::gatypes::SolutionDataTypes;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};

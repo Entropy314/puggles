@@ -18,10 +18,10 @@ fn main() {
 
 #[cfg(feature = "gpu")]
 fn main() {
-    use rustypus::core::{EvalFn, Problem};
-    use rustypus::gatypes::{Real, SolutionDataTypes};
-    use rustypus::genetic_algorithms_v2::{ExecutionMode, NSGAII};
-    use rustypus::gpu_evaluator::GpuEvaluator;
+    use puggles::core::{EvalFn, Problem};
+    use puggles::gatypes::{Real, SolutionDataTypes};
+    use puggles::genetic_algorithms_v2::{ExecutionMode, NSGAII};
+    use puggles::gpu_evaluator::GpuEvaluator;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Instant;

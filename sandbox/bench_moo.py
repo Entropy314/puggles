@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-bench_moo.py — MOO benchmark: rustypus (native Rust CPU) vs pymoo / platypus / DEAP,
+bench_moo.py — MOO benchmark: puggles (native Rust CPU) vs pymoo / platypus / DEAP,
 on a data-driven portfolio problem (minimize variance, maximize return; 20 assets).
 
 Two measurements, because they scale differently:
@@ -8,7 +8,7 @@ Two measurements, because they scale differently:
   B. Optimization — the optimizer only sees the 20x20 covariance, so it is
      size-invariant; measured once on a representative dataset.
 
-rustypus numbers come from the native Rust example `bench_large_data` (the Python
+puggles numbers come from the native Rust example `bench_large_data` (the Python
 bindings were removed and return in a later PR).
 
 Run:  .venv/bin/python bench_moo.py
@@ -42,7 +42,7 @@ def peak_mem_mb(fn):
     r = fn(); done[0] = True; t.join()
     return r, peak[0] / 1024 / 1024
 
-# ── rustypus native (subprocess) ──────────────────────────────────────────────
+# ── puggles native (subprocess) ──────────────────────────────────────────────
 
 def run_rust_native():
     """Build+run bench_large_data, parse RESULT lines → {label: {...}}."""
@@ -174,8 +174,8 @@ print(f"{'optimizer':<22} {'opt ms':>9} {'±std':>7} {'peak MB':>8}")
 print("-" * 50)
 r = rust.get(OPT_SIZE, {})
 if r:
-    print(f"{'rustypus (Rust/seq)':<22} {r['seq_ms']:>9.1f} {'—':>7} {r['seq_mb']:>8.0f}")
-    print(f"{'rustypus (Rust/par)':<22} {r['par_ms']:>9.1f} {'—':>7} {r['par_mb']:>8.0f}")
+    print(f"{'puggles (Rust/seq)':<22} {r['seq_ms']:>9.1f} {'—':>7} {r['seq_mb']:>8.0f}")
+    print(f"{'puggles (Rust/par)':<22} {r['par_ms']:>9.1f} {'—':>7} {r['par_mb']:>8.0f}")
 for name, fn in [("pymoo", bench_pymoo), ("platypus", bench_platypus), ("DEAP", bench_deap)]:
     try:
         ms, std, mem = fn(means, cov)

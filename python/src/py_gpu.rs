@@ -2,7 +2,7 @@
 ///
 /// Usage:
 /// ```python
-/// import rustypus
+/// import puggles
 ///
 /// shader = """
 /// @group(0) @binding(0) var<storage, read> solutions: array<f32>;
@@ -25,19 +25,19 @@
 /// }
 /// """
 ///
-/// problem = rustypus.GpuProblem(
+/// problem = puggles.GpuProblem(
 ///     solution_length=10,
 ///     number_of_objectives=1,
-///     solution_data_types=[rustypus.Real(-5.0, 5.0)] * 10,
+///     solution_data_types=[puggles.Real(-5.0, 5.0)] * 10,
 ///     shader_wgsl=shader,
 /// )
-/// ga = rustypus.NSGAII(problem, population_size=100, execution_mode="gpu")
+/// ga = puggles.NSGAII(problem, population_size=100, execution_mode="gpu")
 /// ga.run(5000)
 /// ```
 
 use pyo3::prelude::*;
-use rustypus::core::{EvalFn, Problem};
-use rustypus::gpu_evaluator::GpuEvaluator;
+use puggles::core::{EvalFn, Problem};
+use puggles::gpu_evaluator::GpuEvaluator;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 

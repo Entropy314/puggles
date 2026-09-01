@@ -1,4 +1,4 @@
-//! Isolated optimizer memory + time: rustypus on a synthetic 20-asset portfolio.
+//! Isolated optimizer memory + time: puggles on a synthetic 20-asset portfolio.
 //!
 //! No CSV load — a synthetic 20x20 covariance is built in-process, so peak RSS reflects
 //! only the Rust runtime + optimizer working set (a clean comparison vs the Python libs,
@@ -6,9 +6,9 @@
 //!
 //! Run: cargo run --release --example bench_mem
 
-use rustypus::core::{EvalFn, Problem};
-use rustypus::gatypes::{Real, SolutionDataTypes};
-use rustypus::genetic_algorithms_v2::{ExecutionMode, NSGAII};
+use puggles::core::{EvalFn, Problem};
+use puggles::gatypes::{Real, SolutionDataTypes};
+use puggles::genetic_algorithms_v2::{ExecutionMode, NSGAII};
 use std::sync::{atomic::{AtomicU64, Ordering}, Arc, RwLock};
 use std::time::Instant;
 use sysinfo::{Pid, System};
@@ -69,7 +69,7 @@ fn main() {
         variable_constraints: None, eval_fn: EvalFn::Single(portfolio),
     });
 
-    for (label, mode) in [("rustypus-seq", ExecutionMode::Sequential), ("rustypus-par", ExecutionMode::MultiThreaded)] {
+    for (label, mode) in [("puggles-seq", ExecutionMode::Sequential), ("puggles-par", ExecutionMode::MultiThreaded)] {
         NSGAII::new(Arc::clone(&problem), POP, mode).run(NFE); // warm-up
         let (ms, mb) = peak_rss(|| { NSGAII::new(Arc::clone(&problem), POP, mode).run(NFE); });
         println!("MEM\t{label}\t{ms:.1}\t{mb:.0}");

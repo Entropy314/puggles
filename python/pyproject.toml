@@ -3,9 +3,9 @@ requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "rustypus"
+name = "puggles"
 version = "0.1.0"
-description = "Python bindings for the rustypus multi-objective genetic algorithms library"
+description = "Python bindings for the puggles multi-objective genetic algorithms library"
 requires-python = ">=3.8"
 
 [tool.maturin]

@@ -676,6 +676,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
+name = "puggles"
+version = "0.1.0"
+dependencies = [
+ "pollster",
+ "rand",
+ "rayon",
+ "serde",
+ "smallvec",
+ "wgpu",
+]
+
+[[package]]
+name = "puggles-python"
+version = "0.1.0"
+dependencies = [
+ "puggles",
+ "pyo3",
+ "rayon",
+]
+
+[[package]]
 name = "pyo3"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -834,27 +855,6 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
-
-[[package]]
-name = "rustypus"
-version = "0.1.0"
-dependencies = [
- "pollster",
- "rand",
- "rayon",
- "serde",
- "smallvec",
- "wgpu",
-]
-
-[[package]]
-name = "rustypus-python"
-version = "0.1.0"
-dependencies = [
- "pyo3",
- "rayon",
- "rustypus",
-]
 
 [[package]]
 name = "scopeguard"

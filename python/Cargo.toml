@@ -1,21 +1,21 @@
-# Own workspace so this cdylib is isolated from the root rustypus rlib workspace
+# Own workspace so this cdylib is isolated from the root puggles rlib workspace
 # (mirrors sandbox/Cargo.toml). maturin builds from here.
 [workspace]
 
 [package]
-name = "rustypus-python"
+name = "puggles-python"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "rustypus"
+name = "puggles"
 crate-type = ["cdylib"]
 
 [features]
-gpu = ["rustypus/gpu"]
+gpu = ["puggles/gpu"]
 
 [dependencies]
-rustypus = { path = ".." }
+puggles = { path = ".." }
 pyo3 = { version = "0.25", features = ["extension-module"] }
 rayon = "1.10.0"
 

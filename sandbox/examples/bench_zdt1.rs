@@ -1,4 +1,4 @@
-//! ZDT1 NSGA-II benchmark — rustypus vs the Python ecosystem.
+//! ZDT1 NSGA-II benchmark — puggles vs the Python ecosystem.
 //!
 //! Run in release mode:  cargo run --release --example bench_zdt1
 //!
@@ -12,9 +12,9 @@
 //!               dominates.  Rayon gives near-linear speedup; Python cannot
 //!               exploit threads due to the GIL.
 
-use rustypus::core::{EvalFn, Problem, Solution};
-use rustypus::gatypes::{Real, SolutionDataTypes};
-use rustypus::genetic_algorithms_v2::{ExecutionMode, NSGAII};
+use puggles::core::{EvalFn, Problem, Solution};
+use puggles::gatypes::{Real, SolutionDataTypes};
+use puggles::genetic_algorithms_v2::{ExecutionMode, NSGAII};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -172,8 +172,8 @@ fn main() {
     println!("# pop={POP}  NFE={NFE}  5 runs  IGD lower=better");
     println!("{:<34} {:>10} {:>10} {:>9} {:>9}", "library", "ms/run", "±std", "IGD", "±std");
     println!("{hr}");
-    bench(Arc::clone(&zdt1_prob), ExecutionMode::Sequential, "rustypus (sequential)", 5, true);
-    bench(Arc::clone(&zdt1_prob), ExecutionMode::MultiThreaded, "rustypus (parallel)", 5, true);
+    bench(Arc::clone(&zdt1_prob), ExecutionMode::Sequential, "puggles (sequential)", 5, true);
+    bench(Arc::clone(&zdt1_prob), ExecutionMode::MultiThreaded, "puggles (parallel)", 5, true);
     println!("{hr}");
     println!("# Install libraries and run bench_python.py to compare with pymoo/DEAP/platypus.");
 
@@ -201,8 +201,8 @@ fn main() {
     println!("# pop={POP}  NFE={NFE}  3 runs  (timing only; IGD not applicable)");
     println!("{:<34} {:>10} {:>10}", "library", "ms/run", "±std");
     println!("{}", "─".repeat(56));
-    bench(Arc::clone(&exp_prob), ExecutionMode::Sequential, "rustypus (sequential)", 3, false);
-    bench(Arc::clone(&exp_prob), ExecutionMode::MultiThreaded, "rustypus (parallel)", 3, false);
+    bench(Arc::clone(&exp_prob), ExecutionMode::Sequential, "puggles (sequential)", 3, false);
+    bench(Arc::clone(&exp_prob), ExecutionMode::MultiThreaded, "puggles (parallel)", 3, false);
     println!("{}", "─".repeat(56));
 
     let n_cores = std::thread::available_parallelism()

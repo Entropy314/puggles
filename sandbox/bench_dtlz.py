@@ -2,7 +2,7 @@
 """
 bench_dtlz.py — DTLZ2 (3-objective) NSGA-II 5-way comparison.
 
-Libraries: rustypus (py) / pymoo / platypus / DEAP / rustypus (native Rust).
+Libraries: puggles (py) / pymoo / platypus / DEAP / puggles (native Rust).
 Metrics (computed uniformly with pymoo indicators against the true DTLZ2 front):
     ms/run   — wall-clock time (lower better)
     HV       — hypervolume, ref point [1.1,1.1,1.1] (higher better)
@@ -65,8 +65,8 @@ def summarize(times, hvs, igds):
 
 
 # ── Runners ───────────────────────────────────────────────────────────────────
-def bench_rustypus_py():
-    import rustypus as rp
+def bench_puggles_py():
+    import puggles as rp
 
     times, hvs, igds = [], [], []
     for _ in range(RUNS):
@@ -82,8 +82,8 @@ def bench_rustypus_py():
     return summarize(times, hvs, igds)
 
 
-def bench_rustypus_py_nsga3():
-    import rustypus as rp
+def bench_puggles_py_nsga3():
+    import puggles as rp
 
     times, hvs, igds = [], [], []
     for _ in range(RUNS):
@@ -204,9 +204,9 @@ def bench_native_rust():
 
 # ── Output ────────────────────────────────────────────────────────────────────
 BENCHMARKS = [
-    ("rustypus (native)", bench_native_rust),
-    ("rustypus (py)", bench_rustypus_py),
-    ("rustypus-III (py)", bench_rustypus_py_nsga3),
+    ("puggles (native)", bench_native_rust),
+    ("puggles (py)", bench_puggles_py),
+    ("puggles-III (py)", bench_puggles_py_nsga3),
     ("pymoo", bench_pymoo),
     ("platypus", bench_platypus),
     ("DEAP", bench_deap),

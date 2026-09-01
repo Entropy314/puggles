@@ -103,7 +103,7 @@ impl GpuEvaluator {
             .expect("No GPU adapter found. Ensure a wgpu-compatible GPU is available.");
 
         let info = adapter.get_info();
-        eprintln!("rustypus: GPU = {} ({:?}, {:?})", info.name, info.device_type, info.backend);
+        eprintln!("puggles: GPU = {} ({:?}, {:?})", info.name, info.device_type, info.backend);
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor::default(), None)
@@ -111,12 +111,12 @@ impl GpuEvaluator {
             .expect("Failed to create wgpu device");
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("rustypus_objective_shader"),
+            label: Some("puggles_objective_shader"),
             source: wgpu::ShaderSource::Wgsl(shader_wgsl.into()),
         });
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("rustypus_bgl"),
+            label: Some("puggles_bgl"),
             entries: &[
                 // binding 0: solutions input (read-only storage)
                 wgpu::BindGroupLayoutEntry {
@@ -168,19 +168,19 @@ impl GpuEvaluator {
         // Upload the auxiliary data (or a 1-element placeholder — zero-sized buffers are invalid).
         let data_src: Vec<f32> = if data.is_empty() { vec![0.0] } else { data.to_vec() };
         let data_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("rustypus_data"),
+            label: Some("puggles_data"),
             contents: unsafe { as_bytes(&data_src) },
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("rustypus_pipeline_layout"),
+            label: Some("puggles_pipeline_layout"),
             bind_group_layouts: &[&bind_group_layout],
             push_constant_ranges: &[],
         });
 
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("rustypus_compute_pipeline"),
+            label: Some("puggles_compute_pipeline"),
             layout: Some(&pipeline_layout),
             module: &shader,
             entry_point: "main",
@@ -250,7 +250,7 @@ impl GpuEvaluator {
         });
 
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("rustypus_bg"),
+            label: Some("puggles_bg"),
             layout: &self.bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: solution_buf.as_entire_binding() },
@@ -261,12 +261,12 @@ impl GpuEvaluator {
         });
 
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("rustypus_encoder"),
+            label: Some("puggles_encoder"),
         });
 
         {
             let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("rustypus_cpass"),
+                label: Some("puggles_cpass"),
                 timestamp_writes: None,
             });
             cpass.set_pipeline(&self.pipeline);

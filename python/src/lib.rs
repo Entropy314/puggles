@@ -11,7 +11,7 @@ mod py_solution;
 mod py_types;
 
 #[pymodule]
-fn rustypus(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn puggles(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Core types
     m.add_class::<py_types::PyReal>()?;
     m.add_class::<py_types::PyInteger>()?;

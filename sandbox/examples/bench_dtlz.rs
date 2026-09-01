@@ -1,4 +1,4 @@
-//! DTLZ2 (3-objective) NSGA-II benchmark — native rustypus.
+//! DTLZ2 (3-objective) NSGA-II benchmark — native puggles.
 //!
 //! Run in release mode:  cargo run --release --example bench_dtlz
 //!
@@ -9,9 +9,9 @@
 //!   RESULT<TAB>par<TAB><mean_ms><TAB><std_ms>
 //!   PT<TAB>f1<TAB>f2<TAB>f3    (final sequential archive front — for HV/IGD)
 
-use rustypus::core::{EvalFn, Problem};
-use rustypus::gatypes::{Real, SolutionDataTypes};
-use rustypus::genetic_algorithms_v2::{ExecutionMode, NSGAII};
+use puggles::core::{EvalFn, Problem};
+use puggles::gatypes::{Real, SolutionDataTypes};
+use puggles::genetic_algorithms_v2::{ExecutionMode, NSGAII};
 use std::f64::consts::PI;
 use std::sync::Arc;
 use std::time::Instant;

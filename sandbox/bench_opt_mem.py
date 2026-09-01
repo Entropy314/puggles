@@ -2,7 +2,7 @@
 """Run ONE optimizer in this (isolated) process on a synthetic 20-asset portfolio,
 print time + peak RSS. One process per library → clean, uncontaminated memory.
 
-Usage:  python bench_opt_mem.py {pymoo|platypus|deap|rustypus}
+Usage:  python bench_opt_mem.py {pymoo|platypus|deap|puggles}
 Output: MEM\t<lib>\t<ms>\t<peak_mb>
 """
 import sys, time, resource
@@ -62,8 +62,8 @@ def run_deap():
             if not i.fitness.valid: i.fitness.values = tb.evaluate(i)
         pop = tb.select(pop + off, POP)
 
-def run_rustypus():
-    import rustypus as rp
+def run_puggles():
+    import puggles as rp
     p = rp.Problem(solution_length=N, number_of_objectives=2,
                    solution_data_types=[rp.Real(0.0, 1.0)] * N,
                    objective_function=lambda w: list(portfolio(w)),
@@ -71,7 +71,7 @@ def run_rustypus():
     rp.NSGAII(p, population_size=POP, execution_mode="sequential").run(NFE)
 
 DISPATCH = {"pymoo": run_pymoo, "platypus": run_platypus, "deap": run_deap,
-            "rustypus": run_rustypus}
+            "puggles": run_puggles}
 lib = sys.argv[1]
 DISPATCH[lib]()  # warm-up
 t0 = time.perf_counter()

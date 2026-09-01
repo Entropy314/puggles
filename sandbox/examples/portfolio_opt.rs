@@ -11,9 +11,9 @@
 //! Run: cargo run --example portfolio_opt
 
 use polars::prelude::*;
-use rustypus::core::{EvalFn, Problem};
-use rustypus::gatypes::{Real, SolutionDataTypes};
-use rustypus::genetic_algorithms_v2::{ExecutionMode, NSGAII};
+use puggles::core::{EvalFn, Problem};
+use puggles::gatypes::{Real, SolutionDataTypes};
+use puggles::genetic_algorithms_v2::{ExecutionMode, NSGAII};
 use std::sync::{Arc, OnceLock};
 
 struct PortfolioData {

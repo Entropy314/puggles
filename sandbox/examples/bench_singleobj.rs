@@ -1,4 +1,4 @@
-//! Single-objective GA comparison — rustypus vs genevo vs genetic_algorithm.
+//! Single-objective GA comparison — puggles vs genevo vs genetic_algorithm.
 //!
 //! genevo and genetic_algorithm are SINGLE-objective GA frameworks (scalar fitness);
 //! they cannot produce Pareto fronts, so they can't run the multi-objective ZDT1/DTLZ2
@@ -22,7 +22,7 @@ use std::time::Instant;
 const N: usize = 10; // dimensions
 const POP: usize = 100;
 const NFE: usize = 20_000; // equal evaluation budget for every library
-const RUNS: usize = 15; // more runs → stable means (Rastrigin is multi-modal; rustypus +
+const RUNS: usize = 15; // more runs → stable means (Rastrigin is multi-modal; puggles +
                         // genetic_algorithm are seeded per run for reproducibility)
 const BOUND: f64 = 5.12;
 
@@ -56,11 +56,11 @@ struct Row {
     evals: f64,
 }
 
-// ── rustypus (NSGA-II with a single objective) ────────────────────────────────
-fn bench_rustypus() -> Row {
-    use rustypus::core::{EvalFn, Problem};
-    use rustypus::gatypes::{Real, SolutionDataTypes};
-    use rustypus::genetic_algorithms_v2::{ExecutionMode, NSGAII};
+// ── puggles (NSGA-II with a single objective) ────────────────────────────────
+fn bench_puggles() -> Row {
+    use puggles::core::{EvalFn, Problem};
+    use puggles::gatypes::{Real, SolutionDataTypes};
+    use puggles::genetic_algorithms_v2::{ExecutionMode, NSGAII};
     use std::sync::Arc;
 
     fn obj(x: &Vec<f64>) -> Vec<f64> {
@@ -257,7 +257,7 @@ fn main() {
     println!("{hr}");
 
     for (name, r) in [
-        ("rustypus", bench_rustypus()),
+        ("puggles", bench_puggles()),
         ("genevo", bench_genevo()),
         ("genetic_algorithm", bench_genetic_algorithm()),
     ] {

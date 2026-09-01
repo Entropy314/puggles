@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# run_benchmarks.sh — full rustypus benchmark suite
+# run_benchmarks.sh — full puggles benchmark suite
 #
 # Benchmark 1 — ZDT1 NSGA-II
-#   rustypus (native seq/par) vs rustypus-py, pymoo, platypus, DEAP
+#   puggles (native seq/par) vs puggles-py, pymoo, platypus, DEAP
 #   Metric: IGD (↓ better, 0 = optimal Pareto front)
 #
 # Benchmark 2 — Portfolio optimisation on 1 MB / 10 MB / 100 MB datasets
@@ -14,7 +14,7 @@
 #   bash run_benchmarks.sh
 #
 # Python deps: pip install platypus-opt pymoo deap polars pandas numpy
-# rustypus Python bindings:
+# puggles Python bindings:
 #   source .venv/bin/activate
 #   cd ../python && PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin develop --release
 # Dataset generation (run once):
@@ -56,7 +56,7 @@ echo ""
 echo "Notes:"
 echo "  · pymoo vectorises the objective with NumPy (batch eval) — fastest on cheap objectives."
 echo "  · platypus/DEAP are pure-Python single-threaded; slower on algorithm overhead."
-echo "  · rustypus py/* crosses FFI on every objective call; py/par amortises this via Rayon."
+echo "  · puggles py/* crosses FFI on every objective call; py/par amortises this via Rayon."
 echo "  · All libraries reach the same solution quality (IGD ≈ 0.005) at NFE=10,000."
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -67,7 +67,7 @@ echo "║  N_ASSETS=20  pop=200  NFE=10,000  │  datasets: 1 MB / 10 MB / 100 M
 echo "╚══════════════════════════════════════════════════════════════════════════╝"
 
 echo ""
-echo "┌─ Rust native  (polars-Rust load + serial cov + rustypus seq/par) ─────────"
+echo "┌─ Rust native  (polars-Rust load + serial cov + puggles seq/par) ─────────"
 cargo build --release --example bench_large_data -q 2>/dev/null
 echo ""
 ./target/release/examples/bench_large_data
@@ -81,6 +81,6 @@ echo ""
 echo "Notes:"
 echo "  · Preprocessing (load + cov) is shared; only the optimisation stage differs across libraries."
 echo "  · polars-py is 9× faster than pandas at 100 MB; use polars for large CSV pipelines."
-echo "  · rustypus native cov is a serial Rust loop — slower than numpy BLAS at 100 MB."
+echo "  · puggles native cov is a serial Rust loop — slower than numpy BLAS at 100 MB."
 echo "  · Optimisation time is flat across dataset sizes: complexity = f(N_ASSETS, NFE), not rows."
-echo "  · platypus and DEAP evaluate one solution at a time; 8–9× slower than rustypus on opt."
+echo "  · platypus and DEAP evaluate one solution at a time; 8–9× slower than puggles on opt."

@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use rustypus::core::Solution;
+use puggles::core::Solution;
 
 /// Owned solution exposed to Python. No lifetime parameters.
 #[pyclass(name = "Solution")]

@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
-use rustypus::genetic_algorithms_v2::ExecutionMode;
-use rustypus::nsga3::NSGAIII;
+use puggles::genetic_algorithms_v2::ExecutionMode;
+use puggles::nsga3::NSGAIII;
 use std::sync::Arc;
 
 use crate::py_nsgaii::extract_store;

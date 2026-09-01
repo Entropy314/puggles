@@ -8,7 +8,7 @@
 
 ## Context
 
-The §5 single-objective benchmark put rustypus at **2.75 µs/eval** vs genevo 0.43 and
+The §5 single-objective benchmark put puggles at **2.75 µs/eval** vs genevo 0.43 and
 genetic_algorithm 0.16 — ~6–17× more wall-time per evaluation. The cost is NSGA-II's
 per-generation bookkeeping, not the objective. The **quick wins** (de-virtualize the dominance
 comparison + an M=1 fast path — see `.claude/plans/for-this-i-want-glistening-avalanche.md`) are
@@ -109,7 +109,7 @@ feasible∪archive from scratch. Avoid the feasible-clone by ranking indices fir
 ## C. Situational (only under specific conditions)
 
 ### C1. Fitness caching — **mostly already handled**
-rustypus already skips re-evaluating unchanged solutions: `evaluate_population` only evaluates
+puggles already skips re-evaluating unchanged solutions: `evaluate_population` only evaluates
 `!evaluated` ([genetic_algorithms_v2.rs:456-459](src/genetic_algorithms_v2.rs#L456)) and survivors keep
 `evaluated = true`. A gene-keyed cache would only add value by **deduplicating identical new
 offspring** — niche. **Skip** unless profiling shows many duplicate genomes.

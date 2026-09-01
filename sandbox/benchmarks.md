@@ -1,4 +1,4 @@
-# rustypus Benchmark Analysis
+# puggles Benchmark Analysis
 
 **Machine:** Apple M3 — 8 logical CPU cores, 10-core GPU (Metal)
 **Rust:** release profile with `lto = true`, `codegen-units = 1`, rustc 1.94
@@ -16,7 +16,7 @@
 > **~3.8× faster** on the portfolio problem (176 ms → 46 ms) and **~2.3×** on ZDT1 (62 → 27 ms),
 > with identical solution quality (IGD unchanged) and memory.
 >
-> **rustypus is measured two ways.** *native* rows run the pure-Rust examples; *py* rows run the
+> **puggles is measured two ways.** *native* rows run the pure-Rust examples; *py* rows run the
 > restored pyo3/maturin Python bindings (`python/` crate) with a **Python-callable objective** —
 > apples-to-apples with how pymoo/platypus/DEAP are used. Every eval crosses the FFI boundary and
 > re-acquires the GIL, so `py` runs always execute Sequential; it is still far faster than the
@@ -27,17 +27,17 @@
 
 ```bash
 cd sandbox
-# Build + install the Python bindings once (for every "rustypus (py)" row):
+# Build + install the Python bindings once (for every "puggles (py)" row):
 ( cd ../python && ../sandbox/.venv/bin/maturin develop --release )
 
 cargo run --release --example bench_zdt1                       # §1 + §2 (CPU, native)
-.venv/bin/python bench_python.py                               # §1 (5-way: +rustypus-py/pymoo/platypus/DEAP)
+.venv/bin/python bench_python.py                               # §1 (5-way: +puggles-py/pymoo/platypus/DEAP)
 cargo run --release --features gpu --example bench_gpu         # §2 (GPU crossover)
 cargo run --release --example bench_large_data                 # §3a pipeline timing + memory
-cargo run --release --example bench_mem                        # §3b optimizer RSS (rustypus native, isolated)
-for l in rustypus pymoo platypus deap; do .venv/bin/python bench_opt_mem.py $l; done  # §3b optimizer RSS (isolated)
+cargo run --release --example bench_mem                        # §3b optimizer RSS (puggles native, isolated)
+for l in puggles pymoo platypus deap; do .venv/bin/python bench_opt_mem.py $l; done  # §3b optimizer RSS (isolated)
 .venv/bin/python bench_dtlz.py                                 # §4 (DTLZ2 3-obj 5-way: time + HV + IGD)
-cargo run --release --example bench_singleobj                  # §5 (single-obj: rustypus vs genevo vs genetic_algorithm)
+cargo run --release --example bench_singleobj                  # §5 (single-obj: puggles vs genevo vs genetic_algorithm)
 ```
 
 ---
@@ -50,7 +50,7 @@ cargo run --release --example bench_singleobj                  # §5 (single-obj
    - [3a. Preprocessing: CSV load + covariance](#3a-preprocessing-csv-load--covariance)
    - [3b. Optimizer comparison (size-invariant)](#3b-optimizer-comparison-size-invariant)
 4. [Many-Objective: DTLZ2 (3 objectives)](#4-many-objective-dtlz2)
-5. [Single-Objective: rustypus vs genevo vs genetic_algorithm](#5-single-objective)
+5. [Single-Objective: puggles vs genevo vs genetic_algorithm](#5-single-objective)
 6. [Bugs Fixed During Benchmarking](#6-bugs-fixed)
 7. [Summary and Guidance](#7-summary-and-guidance)
 
@@ -66,18 +66,18 @@ cargo run --release --example bench_singleobj                  # §5 (single-obj
 
 | library | ms / run | ±std | IGD | ±std |
 | --- | --- | --- | --- | --- |
-| **rustypus (native, sequential)** | **19.6** | 1.2 | 0.0053 | 0.0001 |
-| rustypus (native, parallel) | 35.5 | 0.2 | 0.0051 | 0.0001 |
-| **rustypus (py)** | **31.8** | 3.1 | 0.0051 | 0.0003 |
+| **puggles (native, sequential)** | **19.6** | 1.2 | 0.0053 | 0.0001 |
+| puggles (native, parallel) | 35.5 | 0.2 | 0.0051 | 0.0001 |
+| **puggles (py)** | **31.8** | 3.1 | 0.0051 | 0.0003 |
 | pymoo | 215.4 | 12.8 | 0.0045 | 0.0004 |
 | DEAP | 843.4 | 4.2 | 0.0048 | 0.0003 |
 | platypus | 1062.1 | 3.9 | 0.0108 | 0.0108 |
 
 **Convergence:** all libraries reach IGD ≈ 0.005 — identical solution quality (platypus shows one poorly-converged run in this batch, inflating its mean/std; its median is ≈ 0.005). ZDT1 converges for any correct NSGA-II within 10,000 NFE.
 
-**Why rustypus is fastest (27 ms vs pymoo 215 ms — ~8×):** ZDT1 costs ~30–70 ns per evaluation, so the ~0.7 ms of actual objective math is <1% of runtime. Everything else is **algorithm overhead** — non-dominated sort, crowding distance, selection, variation, allocation — which compiled Rust does with far less per-item cost than pymoo's NumPy batch dispatch, and ~13–16× less than the pure-Python loops in platypus/DEAP.
+**Why puggles is fastest (27 ms vs pymoo 215 ms — ~8×):** ZDT1 costs ~30–70 ns per evaluation, so the ~0.7 ms of actual objective math is <1% of runtime. Everything else is **algorithm overhead** — non-dominated sort, crowding distance, selection, variation, allocation — which compiled Rust does with far less per-item cost than pymoo's NumPy batch dispatch, and ~13–16× less than the pure-Python loops in platypus/DEAP.
 
-**rustypus (py) — 31.8 ms, ~7× faster than pymoo — despite a Python objective.** The bindings call a Python `lambda` per evaluation (FFI + GIL re-acquire each time), yet the whole GA loop stays in Rust, so it lands within ~1.2× of native rustypus and still crushes the other Python libraries. This is the fair "use rustypus from Python" number; a native Rust objective (no per-eval GIL) matches the native row.
+**puggles (py) — 31.8 ms, ~7× faster than pymoo — despite a Python objective.** The bindings call a Python `lambda` per evaluation (FFI + GIL re-acquire each time), yet the whole GA loop stays in Rust, so it lands within ~1.2× of native puggles and still crushes the other Python libraries. This is the fair "use puggles from Python" number; a native Rust objective (no per-eval GIL) matches the native row.
 
 **Batch objectives amortize the GIL.** For an *expensive* Python objective, pass
 `batch_objective_function=f` where `f(pop) -> objectives` evaluates the whole population at once
@@ -98,8 +98,8 @@ An O(N²) coupling simulation (~300 µs/eval) puts the run in the **evaluation-d
 
 | mode | ms / run | ±std |
 | --- | --- | --- |
-| rustypus (sequential) | 130.1 | 0.1 |
-| **rustypus (parallel)** | **58.7** | 0.3 |
+| puggles (sequential) | 130.1 | 0.1 |
+| **puggles (parallel)** | **58.7** | 0.3 |
 
 **2.2× on 8 cores.** Sub-linear because the serial algorithm overhead (§1) doesn't parallelize; net evaluation time alone scales ~3×. **Python cannot do this** — the GIL blocks threads and multiprocessing serialization dominates at this granularity (estimated ≥ 30× slower).
 
@@ -181,22 +181,22 @@ process on a synthetic 20×20 covariance (no dataset load)**, so peak RSS is a c
 big DataFrame. Drivers: [`bench_mem.rs`](examples/bench_mem.rs) (Rust) and
 [`bench_opt_mem.py`](bench_opt_mem.py) (one Python process per library).
 
-| optimizer | opt time (ms) | peak RSS (MB) | vs rustypus (time) |
+| optimizer | opt time (ms) | peak RSS (MB) | vs puggles (time) |
 | --- | --- | --- | --- |
-| **rustypus (native, sequential)** | **27.2** | **8** | 1.0× |
-| **rustypus (native, parallel)** | **29.3** | **9** | 1.1× |
-| rustypus (py) | 73.9 | 36 | 2.7× slower |
+| **puggles (native, sequential)** | **27.2** | **8** | 1.0× |
+| **puggles (native, parallel)** | **29.3** | **9** | 1.1× |
+| puggles (py) | 73.9 | 36 | 2.7× slower |
 | pymoo (NSGA2, vectorized numpy) | 217.4 | 72 | 8× slower |
 | DEAP (NSGA-II) | 1681.2 | 42 | 62× slower |
 | platypus (NSGA-II) | 1700.2 | 38 | 63× slower |
 
-**rustypus (native) is ~8× faster than pymoo and ~60× faster than the pure-Python libraries — at
+**puggles (native) is ~8× faster than pymoo and ~60× faster than the pure-Python libraries — at
 ~5–9× less memory** (8 MB vs 38–72 MB). The Python figures are dominated by the interpreter +
 numpy baseline; pymoo's vectorized batch evaluation allocates the largest arrays (72 MB), while
 the pure-Python loops in platypus/DEAP stay smaller (38–42 MB) but pay ~60× in time. As in §1,
 sequential ≈ parallel — a 20-variable quadratic is far too cheap for threading to help.
 
-**rustypus (py) — 74 ms / 36 MB.** Still ~3× faster than pymoo from Python. Its 36 MB is the
+**puggles (py) — 74 ms / 36 MB.** Still ~3× faster than pymoo from Python. Its 36 MB is the
 numpy-backed objective's baseline (the portfolio objective calls numpy, so numpy is imported into
 the process), *not* the optimizer: the optimizer working set is the same ~8 MB as native — the
 extra memory is the shared numpy/interpreter cost every Python library here also pays.
@@ -218,27 +218,27 @@ n and is *not* used here; the benchmark uses the standard M=3 form so fronts are
 
 | library | ms / run | ±std | HV ↑ | IGD ↓ |
 | --- | --- | --- | --- | --- |
-| **rustypus-III (py)** | **109** | 4 | **0.731** | **0.021** |
-| **rustypus (native)** | **56.4** | 0.3 | 0.6857 | 0.0739 |
-| **rustypus (py)** | 104.1 | 1.2 | 0.6797 | 0.0772 |
+| **puggles-III (py)** | **109** | 4 | **0.731** | **0.021** |
+| **puggles (native)** | **56.4** | 0.3 | 0.6857 | 0.0739 |
+| **puggles (py)** | 104.1 | 1.2 | 0.6797 | 0.0772 |
 | pymoo | 460.0 | 21.1 | 0.7029 | 0.0716 |
 | platypus | 2549.4 | 4.4 | 0.7042 | 0.0733 |
 | DEAP | 1811.1 | 39.6 | 0.7043 | 0.0751 |
 
-**Speed:** rustypus's NSGA-II stays fastest — native **~6.5× faster than pymoo** and ~25–36× faster
+**Speed:** puggles's NSGA-II stays fastest — native **~6.5× faster than pymoo** and ~25–36× faster
 than platypus/DEAP; the Python-callable binding is still ~4.4× faster than pymoo.
 
 **Quality — NSGA-III wins outright.** NSGA-II ranks a many-objective population by crowding distance,
 which diversifies poorly as objectives grow (HV 0.68 vs ~0.70). The library ships reference-point
 **NSGA-III** ([`src/nsga3.rs`](../src/nsga3.rs)) for exactly this, and it is now exposed to Python
-(`rustypus.NSGAIII`). On DTLZ2 it reaches **HV 0.731 / IGD 0.021 — the best of every library here**
+(`puggles.NSGAIII`). On DTLZ2 it reaches **HV 0.731 / IGD 0.021 — the best of every library here**
 (beating pymoo's 0.701 / 0.073), *and* runs fastest (~109 ms). So the earlier "small quality cost"
 trade-off disappears once you pick the right algorithm: use NSGA-III for 3+ objectives.
-([`bench_dtlz.py`](bench_dtlz.py) row `rustypus-III (py)`.)
+([`bench_dtlz.py`](bench_dtlz.py) row `puggles-III (py)`.)
 
 ---
 
-## 5. Single-Objective — rustypus vs genevo vs genetic_algorithm
+## 5. Single-Objective — puggles vs genevo vs genetic_algorithm
 
 Everything above is **multi-objective** (NSGA-II, Pareto fronts). Two popular Rust GA crates,
 [**genevo**](https://docs.rs/genevo) 0.7 and
@@ -247,17 +247,17 @@ scalar fitness, no Pareto/NSGA machinery (genetic_algorithm's own docs say *"for
 objectives, combine them into a weighted sum"*). They therefore **cannot** run ZDT1/DTLZ2/the
 portfolio front; comparing them there would be meaningless. So this section drops to a level playing
 field: minimize the **Rastrigin** function (continuous, N=10, global minimum 0 at the origin), which
-all three can do — rustypus runs its NSGA-II with a single objective.
+all three can do — puggles runs its NSGA-II with a single objective.
 
 **Apples-to-apples budget.** The fair budget for a GA comparison is a fixed number of *actual
 objective-function evaluations* (NFE) — **not** generations, because `genetic_algorithm` caches
 fitness (unchanged chromosomes aren't re-evaluated), so equal generations would let it do far fewer
 real evaluations than the others. A shared atomic counter inside the objective enforces the budget:
-rustypus's `run(NFE)` counts its own evaluations, genevo is stepped manually until the counter hits
+puggles's `run(NFE)` counts its own evaluations, genevo is stepped manually until the counter hits
 NFE, and `genetic_algorithm`'s generation count is calibrated to spend ≈ NFE. All three land within
 ±1% of the same 20,000 evaluations.
 
-**Settings:** N=10 · pop=100 · **budget = 20,000 evaluations** · 15 runs (rustypus &
+**Settings:** N=10 · pop=100 · **budget = 20,000 evaluations** · 15 runs (puggles &
 genetic_algorithm seeded per run; genevo averaged over the 15) · 1 warm-up.
 Driver: [`examples/bench_singleobj.rs`](examples/bench_singleobj.rs).
 
@@ -265,17 +265,17 @@ Driver: [`examples/bench_singleobj.rs`](examples/bench_singleobj.rs).
 | --- | --- | --- | --- | --- |
 | genetic_algorithm | **3.1** | 0.0 | 4.45 | **0.16** |
 | genevo | 8.5 | 0.3 | 2.53 | 0.42 |
-| rustypus | 14.2 | 1.5 | **0.50** | 0.71 |
+| puggles | 14.2 | 1.5 | **0.50** | 0.71 |
 
-At an equal evaluation budget (all far from a random start ≈ 40), **rustypus reaches the best solution
+At an equal evaluation budget (all far from a random start ≈ 40), **puggles reaches the best solution
 per evaluation** — best f ≈ 0.5 vs genevo 2.5 and genetic_algorithm 4.5. Its real-coded SBX +
 polynomial operators and rank-based selection extract the most from each of the 20,000 evaluations;
 genetic_algorithm's default uniform crossover + single-gene mutation explore the multi-modal landscape
 most weakly. The trade-off is **wall-time per evaluation**: genetic_algorithm cheapest (0.16 µs),
-genevo next (0.42 µs), rustypus 0.71 µs — so rustypus turns each evaluation into the best solution but
+genevo next (0.42 µs), puggles 0.71 µs — so puggles turns each evaluation into the best solution but
 spends the most time doing so.
 
-**rustypus was ~3.7× slower per evaluation before an optimization pass** (2.75 → 0.75 µs/eval;
+**puggles was ~3.7× slower per evaluation before an optimization pass** (2.75 → 0.75 µs/eval;
 55 → 15 ms/run). NSGA-II had been running a naive O(MN²) non-dominated sort + crowding pass every
 generation. Four changes fixed it:
 
@@ -299,11 +299,11 @@ moderate constant-factor win. **Best-Order-Sort** was later added for larger pop
 grows from ~1.4× (N=500) to ~2.3× (N=4000) faster. At the benchmarks' pop=100 the sort stays on ENS,
 so these numbers are unchanged. (Deferred: SmallVec-lighten the `Solution` struct.)
 
-So at equal evaluations it is no longer a lopsided gap: rustypus is now within ~2× of genevo's
+So at equal evaluations it is no longer a lopsided gap: puggles is now within ~2× of genevo's
 per-evaluation cost while matching its quality. genetic_algorithm stays cheapest per evaluation (its
 aggressive fitness caching + light operators) but converts each evaluation into the poorest solution.
 
-**Takeaway:** rustypus is built for *multi-objective* work, where it dominates (§1–§4); on
+**Takeaway:** puggles is built for *multi-objective* work, where it dominates (§1–§4); on
 *single-objective* problems its per-evaluation overhead is now modest rather than crippling. For cheap
 objectives where raw throughput is everything a dedicated single-objective crate still wins wall-clock;
 for expensive objectives the choice is dominated by evaluation cost, not GA bookkeeping. (Not an
@@ -352,27 +352,27 @@ mutation_manager.set_default_real_mutation(Arc::new(PolynomialMutation::new(
 
 | rank | library | opt time | peak RSS | time relative |
 | --- | --- | --- | --- | --- |
-| 1 | rustypus (native seq/par) | ~27 ms | **8 MB** | 1.0× |
-| 2 | rustypus (py) | ~74 ms | 36 MB | 2.7× |
+| 1 | puggles (native seq/par) | ~27 ms | **8 MB** | 1.0× |
+| 2 | puggles (py) | ~74 ms | 36 MB | 2.7× |
 | 3 | pymoo | ~217 ms | 72 MB | 8× |
 | 4 | DEAP | ~1,681 ms | 42 MB | 62× |
 | 5 | platypus | ~1,700 ms | 38 MB | 63× |
 
-rustypus is both the fastest and by far the leanest — native is **~8× faster than pymoo, ~60×
+puggles is both the fastest and by far the leanest — native is **~8× faster than pymoo, ~60×
 faster than the pure-Python libraries, at ~5–9× less memory** (after the §5 sort optimization, the
 pop=200 portfolio dropped from ~47 to ~27 ms); even called from Python with a Python objective it
 stays ~3× ahead of pymoo. Python footprints are dominated by the interpreter + numpy baseline. On
 two objectives (ZDT1, portfolio) solution quality is identical across libraries; on three-plus
-objectives (DTLZ2, §4) **NSGA-III (`rustypus.NSGAIII`) now wins outright** on both quality and speed. (Full-pipeline RSS scales with dataset size, but that is the loaded
+objectives (DTLZ2, §4) **NSGA-III (`puggles.NSGAIII`) now wins outright** on both quality and speed. (Full-pipeline RSS scales with dataset size, but that is the loaded
 DataFrame, not the optimizer — see §3a/§3b.)
 
-**Scope note — this is a multi-objective story.** All of the above compares rustypus against other
+**Scope note — this is a multi-objective story.** All of the above compares puggles against other
 *multi-objective* optimizers, its design point. For **single-objective** problems (§5), at an equal
 20,000-evaluation budget all three reach comparable Rastrigin quality (best f ≈ 2–4); the spread is
-wall-time per evaluation. A single-objective fast path (added in `src/dominance.rs`) cut rustypus's
+wall-time per evaluation. A single-objective fast path (added in `src/dominance.rs`) cut puggles's
 per-evaluation cost ~3× (2.75 → 0.90 µs) by skipping the O(N²) Pareto sort when there is one
 objective, so it now sits within ~2× of genevo instead of ~6× behind; genetic_algorithm remains
-cheapest per evaluation. Pick the tool to the problem: rustypus for Pareto/multi-objective (or
+cheapest per evaluation. Pick the tool to the problem: puggles for Pareto/multi-objective (or
 single-objective where each evaluation is expensive), a dedicated single-objective crate when
 evaluations are cheap and wall-clock throughput is everything.
 
@@ -386,7 +386,7 @@ evaluations are cheap and wall-clock throughput is everything.
 
 ### Dataset size vs. work
 
-Scaling the dataset 100× changes **preprocessing** time but leaves **optimization** time flat (±3%) — the optimizer only ever sees a 20×20 covariance. Investing in a faster optimizer (rustypus over platypus: ~38×) pays off equally at every dataset size.
+Scaling the dataset 100× changes **preprocessing** time but leaves **optimization** time flat (±3%) — the optimizer only ever sees a 20×20 covariance. Investing in a faster optimizer (puggles over platypus: ~38×) pays off equally at every dataset size.
 
 ### Standard NSGA-II operator defaults (applied by `NSGAII::new()`)
 

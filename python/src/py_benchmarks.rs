@@ -1,6 +1,6 @@
 use pyo3::prelude::*;
-use rustypus::benchmark_objective_functions;
-use rustypus::gatypes::{Real, SolutionDataTypes};
+use puggles::benchmark_objective_functions;
+use puggles::gatypes::{Real, SolutionDataTypes};
 
 use crate::py_problem::{create_problem_from_fn, PyProblem};
 

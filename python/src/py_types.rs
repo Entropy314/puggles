@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use rustypus::gatypes::{BitBinary, Integer, Real, SolutionDataTypes};
+use puggles::gatypes::{BitBinary, Integer, Real, SolutionDataTypes};
 
 #[pyclass(name = "Real")]
 #[derive(Clone, Debug)]

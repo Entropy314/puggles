@@ -8,9 +8,9 @@
 //! Known Pareto front: x2=…=xn=0  →  f2 = 1 - sqrt(f1), f1 ∈ [0,1]
 //! Run: cargo run --example generic_opt
 
-use rustypus::core::{EvalFn, Problem};
-use rustypus::gatypes::{Real, SolutionDataTypes};
-use rustypus::genetic_algorithms_v2::{ExecutionMode, NSGAII};
+use puggles::core::{EvalFn, Problem};
+use puggles::gatypes::{Real, SolutionDataTypes};
+use puggles::genetic_algorithms_v2::{ExecutionMode, NSGAII};
 use std::sync::Arc;
 
 // ZDT1 with N=10 converges well within 20k NFEs.
