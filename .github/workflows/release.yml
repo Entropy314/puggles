@@ -1,6 +1,17 @@
-# Publishes on a version tag: `git tag v0.1.0 && git push origin v0.1.0`.
-# Requires two repository secrets — CARGO_REGISTRY_TOKEN and PYPI_API_TOKEN — or, for PyPI,
-# a Trusted Publisher configured for this repo (then drop the password line below).
+# Two ways to publish:
+#
+#   Staged (use this for a first release) — Actions > Release > Run workflow, and pick a target:
+#     testpypi   rehearsal upload to test.pypi.org; nothing on real PyPI is consumed
+#     pypi       wheels for 5 platforms + sdist -> PyPI
+#     crates-io  the Rust crate -> crates.io
+#
+#   All at once — push a version tag: `git tag v0.1.0 && git push origin v0.1.0`
+#   (a tag ignores the selector and publishes to BOTH registries).
+#
+# PyPI auth: Trusted Publishing, via the `release` environment — no token stored anywhere.
+# Register the publisher at pypi.org (and test.pypi.org separately) as:
+#   owner Entropy314 / repo puggles / workflow release.yml / environment release
+# crates.io auth: repository secret CARGO_REGISTRY_TOKEN.
 name: Release
 
 on:
@@ -12,7 +23,7 @@ on:
         description: "Which registries to publish to"
         type: choice
         default: pypi
-        options: [pypi, crates-io, both]
+        options: [testpypi, pypi, crates-io, both]
 
 permissions:
   contents: read
@@ -34,7 +45,7 @@ jobs:
 
   wheels:
     needs: test
-    if: github.event_name == 'push' || contains(fromJSON('["pypi","both"]'), inputs.targets)
+    if: github.event_name == 'push' || contains(fromJSON('["testpypi","pypi","both"]'), inputs.targets)
     name: wheels (${{ matrix.platform.target }} on ${{ matrix.platform.os }})
     runs-on: ${{ matrix.platform.os }}
     strategy:
@@ -64,7 +75,7 @@ jobs:
 
   sdist:
     needs: test
-    if: github.event_name == 'push' || contains(fromJSON('["pypi","both"]'), inputs.targets)
+    if: github.event_name == 'push' || contains(fromJSON('["testpypi","pypi","both"]'), inputs.targets)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -79,14 +90,21 @@ jobs:
 
   pypi:
     needs: [wheels, sdist]
+    # `targets: testpypi` uploads to test.pypi.org instead — a throwaway rehearsal, since a real
+    # PyPI version number can never be reused once published, even after deleting it.
+    name: publish (${{ inputs.targets == 'testpypi' && 'TestPyPI' || 'PyPI' }})
     runs-on: ubuntu-latest
     environment: release
     permissions:
-      id-token: write # for PyPI Trusted Publishing
+      id-token: write # for Trusted Publishing
     steps:
       - uses: actions/download-artifact@v4
         with:
           pattern: wheels-*
           merge-multiple: true
           path: dist
+      - name: List artifacts
+        run: ls -la dist
       - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: ${{ inputs.targets == 'testpypi' && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}
