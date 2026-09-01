@@ -107,6 +107,26 @@ jobs:
           path: dist
       - name: List artifacts
         run: ls -la dist
+      - name: Check the upload token is present
+        env:
+          TOKEN: ${{ inputs.targets == 'testpypi' && secrets.TEST_PYPI_API_TOKEN || secrets.PYPI_API_TOKEN }}
+        run: |
+          NAME=${{ inputs.targets == 'testpypi' && 'TEST_PYPI_API_TOKEN' || 'PYPI_API_TOKEN' }}
+          if [ -z "$TOKEN" ]; then
+            echo "::error::Repository secret $NAME is empty or unset."
+            echo "The publish step would fall back to Trusted Publishing and fail with a"
+            echo "confusing 'invalid-publisher' error. Add the secret at:"
+            echo "  Settings > Secrets and variables > Actions > New repository secret"
+            echo "  Name: $NAME   (exact, case-sensitive)"
+            echo "Generate the value at the matching host's /manage/account/token/ page."
+            exit 1
+          fi
+          # Never print the token; length alone confirms it arrived.
+          echo "$NAME is set (${#TOKEN} characters)."
+          case "$TOKEN" in
+            pypi-*) echo "Prefix looks correct." ;;
+            *) echo "::warning::Token does not start with 'pypi-' — check you copied the whole value." ;;
+          esac
       - name: Show the identity this job will claim
         run: |
           echo "Register a Trusted Publisher matching EXACTLY these values:"
