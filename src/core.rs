@@ -101,6 +101,15 @@ impl Problem {
         self.variable_constraints = Some(constraints);
         self
     }
+
+    /// Whether *any* constraint source is configured — objective bounds or decision-variable
+    /// `g(x) <= 0`. The single place that answers this: dominance and every non-dominated sort
+    /// gate constraint handling on it, so a problem with only `variable_constraints` is still
+    /// sorted feasibility-first.
+    pub fn has_constraints(&self) -> bool {
+        self.objective_constraint.as_ref().is_some_and(|c| !c.is_empty())
+            || self.variable_constraints.as_ref().is_some_and(|g| !g.is_empty())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -141,13 +150,31 @@ impl Solution {
 
     pub fn evaluate_constraints(&mut self) -> Vec<f64> {
         let mut constraint_values: Vec<f64> = Vec::new();
+        // Bounds and operands are only meaningful together. Half a configuration used to be
+        // skipped silently, dropping every constraint without a word — refuse it instead.
+        match (&self.problem.objective_constraint, &self.problem.objective_constraint_operands) {
+            (Some(_), None) => panic!(
+                "objective_constraint is set but objective_constraint_operands is None — \
+                 supply both (e.g. Some(vec![Some(\"<\".into())])) or neither"
+            ),
+            (None, Some(_)) => panic!(
+                "objective_constraint_operands is set but objective_constraint is None — \
+                 supply both or neither"
+            ),
+            _ => {}
+        }
         if let (Some(constraints), Some(operands)) =
             (&self.problem.objective_constraint, &self.problem.objective_constraint_operands)
         {
             for i in 0..constraints.len() {
-                let bound = constraints[i].unwrap();
+                // A `None` bound or operand means "no constraint on this objective" — the
+                // whole point of the `Option` elements. Treat it as satisfied.
+                let (Some(bound), Some(op)) = (constraints[i], operands[i].as_deref()) else {
+                    constraint_values.push(1.0);
+                    continue;
+                };
                 let obj = self.objective_fitness_values[i];
-                let satisfied = match operands[i].as_deref().unwrap() {
+                let satisfied = match op {
                     "<" => obj < bound,
                     ">" => obj > bound,
                     "<=" => obj <= bound,

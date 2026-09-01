@@ -262,8 +262,12 @@ impl Crossover for BlendCrossover {
     }
 }
 
-// Uniform Crossover for integer types
+/// Uniform crossover for Integer and BitBinary genes: each gene is independently swapped
+/// between the two children with probability `probability` (0.5 = textbook uniform).
+/// Real genes are left to the real-valued operator.
 pub struct UniformCrossover {
+    /// Per-gene swap probability. 1.0 swaps every gene, which just exchanges the parents —
+    /// keep it at 0.5 unless you know why you want otherwise.
     pub probability: f64,
 }
 
@@ -273,29 +277,12 @@ impl Crossover for UniformCrossover {
         let mut child2 = parent2.clone();
 
         for (i, solution_type) in parent1.problem.solution_data_types.iter().enumerate() {
-            match solution_type {
-                SolutionDataTypes::Integer(integer) => {
-                    let lower = integer.lower_bound.unwrap_or(i64::MIN);
-                    let upper = integer.upper_bound.unwrap_or(i64::MAX);
-                    for j in 0..32 {
-                        if rng.gen::<f64>() < self.probability {
-                            let mask = 1 << j;
-                            let c1 = (parent1.solution[i] as i64 & mask) | (parent2.solution[i] as i64 & !mask);
-                            let c2 = (parent2.solution[i] as i64 & mask) | (parent1.solution[i] as i64 & !mask);
-                            child1.solution[i] = c1.clamp(lower, upper) as f64;
-                            child2.solution[i] = c2.clamp(lower, upper) as f64;
-                        }
-                    }
-                }
-                SolutionDataTypes::BitBinary(_) => {
-                    if rng.gen::<f64>() < self.probability {
-                        let c1 = (parent1.solution[i] as i64) ^ (1); // Flip the bit for child1
-                        let c2 = (parent2.solution[i] as i64) ^ (1); // Flip the bit for child2
-                        child1.solution[i] = c1 as f64;
-                        child2.solution[i] = c2 as f64;
-                    }
-                }
-                _ => {}
+            if matches!(solution_type, SolutionDataTypes::Real(_)) {
+                continue;
+            }
+            if rng.gen::<f64>() < self.probability {
+                child1.solution[i] = parent2.solution[i];
+                child2.solution[i] = parent1.solution[i];
             }
         }
 
@@ -307,24 +294,43 @@ impl Crossover for UniformCrossover {
     }
 }
 
-// Arithmetic Crossover for integer types
+/// Arithmetic (whole) crossover: `c1 = a*p1 + (1-a)*p2`, `c2 = (1-a)*p1 + a*p2` with a random
+/// weight `a`. The two children are complements of each other, so the pair carries the parents'
+/// full range — a fixed midpoint would give both children the same genes and collapse diversity.
 pub struct ArithmeticCrossover {
     pub probability: f64,
 }
 
 impl Crossover for ArithmeticCrossover {
-    fn crossover(&self, parent1: &Solution, parent2: &Solution, _rng: &mut SmallRng) -> (Solution, Solution) {
+    fn crossover(&self, parent1: &Solution, parent2: &Solution, rng: &mut SmallRng) -> (Solution, Solution) {
         let mut child1 = parent1.clone();
         let mut child2 = parent2.clone();
         for (i, solution_type) in parent1.problem.solution_data_types.iter().enumerate() {
-            if let SolutionDataTypes::Integer(integer) = solution_type {
-                let lower = integer.lower_bound.unwrap_or(i64::MIN);
-                let upper = integer.upper_bound.unwrap_or(i64::MAX);
-                let c1 = (parent1.solution[i] + parent2.solution[i]) / 2.;
-                let c2 = (parent1.solution[i] + parent2.solution[i]) / 2.;
-                child1.solution[i] = c1.clamp(lower as f64, upper as f64);
-                child2.solution[i] = c2.clamp(lower as f64, upper as f64);
+            if rng.gen::<f64>() >= self.probability {
+                continue;
             }
+            let a: f64 = rng.gen();
+            let (x1, x2) = (parent1.solution[i], parent2.solution[i]);
+            let (mut c1, mut c2) = (a * x1 + (1.0 - a) * x2, (1.0 - a) * x1 + a * x2);
+            match solution_type {
+                SolutionDataTypes::Integer(integer) => {
+                    let lower = integer.lower_bound.unwrap_or(i64::MIN) as f64;
+                    let upper = integer.upper_bound.unwrap_or(i64::MAX) as f64;
+                    // Round: a blended integer gene must stay an integer.
+                    c1 = c1.round().clamp(lower, upper);
+                    c2 = c2.round().clamp(lower, upper);
+                }
+                SolutionDataTypes::Real(real) => {
+                    let lower = real.lower_bound.unwrap_or(f64::MIN);
+                    let upper = real.upper_bound.unwrap_or(f64::MAX);
+                    c1 = c1.clamp(lower, upper);
+                    c2 = c2.clamp(lower, upper);
+                }
+                // A blend of two bits is not a bit — leave binary genes to uniform crossover.
+                SolutionDataTypes::BitBinary(_) => continue,
+            }
+            child1.solution[i] = c1;
+            child2.solution[i] = c2;
         }
 
         child1.evaluated = false;
@@ -349,8 +355,8 @@ impl CrossoverManager {
     pub fn new() -> Self {
         Self {
             default_real_crossover: Box::new(SimulatedBinaryCrossover::new(None, None)),
-            default_integer_crossover: Box::new(UniformCrossover { probability: 1.0 }),
-            default_binary_crossover: Box::new(UniformCrossover { probability: 1.0 }),
+            default_integer_crossover: Box::new(UniformCrossover { probability: 0.5 }),
+            default_binary_crossover: Box::new(UniformCrossover { probability: 0.5 }),
         }
     }
 

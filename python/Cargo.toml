@@ -15,8 +15,8 @@ crate-type = ["cdylib"]
 gpu = ["puggles/gpu"]
 
 [dependencies]
-puggles = { path = ".." }
-pyo3 = { version = "0.25", features = ["extension-module"] }
+puggles = { path = "..", version = "0.1.0" }
+pyo3 = { version = "0.25", features = ["extension-module", "abi3-py39"] }
 rayon = "1.10.0"
 
 [profile.release]

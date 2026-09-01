@@ -5,9 +5,31 @@ build-backend = "maturin"
 [project]
 name = "puggles"
 version = "0.1.0"
-description = "Python bindings for the puggles multi-objective genetic algorithms library"
-requires-python = ">=3.8"
+description = "Fast multi-objective evolutionary optimization (NSGA-II / NSGA-III) — a Rust core with Python bindings"
+readme = "README.md"
+license = { text = "MIT OR Apache-2.0" }
+authors = [{ name = "Entropy314" }]
+# abi3-py39: one wheel per platform covers CPython 3.9 and every later version.
+requires-python = ">=3.9"
+keywords = ["genetic-algorithm", "optimization", "nsga2", "nsga3", "multi-objective", "evolutionary", "pareto"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Homepage = "https://github.com/Entropy314/puggles"
+Repository = "https://github.com/Entropy314/puggles"
+Issues = "https://github.com/Entropy314/puggles/issues"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
 manifest-path = "Cargo.toml"
+module-name = "puggles"

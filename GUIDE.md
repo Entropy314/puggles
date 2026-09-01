@@ -2,7 +2,7 @@
 
 puggles is a Rust implementation of NSGA-II (Non-dominated Sorting Genetic Algorithm II). It handles single- and multi-objective optimization over continuous, integer, and binary decision variables, with optional constraint handling, parallel evaluation (Rayon), and optional GPU acceleration.
 
-> **Python bindings** are temporarily removed and will be reimplemented in a later PR. This guide covers the Rust library.
+> This guide covers the Rust library. The Python bindings live in `python/` — build them with `cd python && maturin develop --release`.
 
 ---
 
@@ -286,19 +286,23 @@ ga.run(30_000);
 | `BlendCrossover` | Real | `{ probability, alpha }` |
 | `UnimodalDistributionCrossover` | Real | `{ probability, distribution_index, nparents, zeta, eta }` |
 | `ParentCentricCrossover` | Real, Integer | `{ nparents, noffspring, eta, zeta }` |
-| `UniformCrossover` | Integer, BitBinary | `{ probability }` — default for Integer/BitBinary |
-| `ArithmeticCrossover` | Integer | `{ probability }` |
+| `UniformCrossover` | Integer, BitBinary | `{ probability }` — per-gene **swap** probability; default for Integer/BitBinary at 0.5. Setting it to 1.0 swaps every gene, which merely exchanges the parents. |
+| `ArithmeticCrossover` | Real, Integer | `{ probability }` — per-gene blend `a*p1+(1-a)*p2` with random `a`; the two children are complements |
 
 **Mutation operators** (`genetic_operators::mutation`):
 
 | Type | Applies to | Constructor |
 |---|---|---|
-| `UniformMutation` | Real, Integer | `::default()` or `{ probability }` — default for Real/Integer |
-| `PolynomialMutation` | Real, Integer | `::new(probability, distribution_index)` |
-| `GaussianMutation` | Real | `::new(probability, standard_deviation)` |
-| `BitFlipMutation` | BitBinary | `::default()` or `{ probability }` — default for BitBinary |
+| `UniformMutation` | Real, Integer | `::default()` or `{ probability }` — resamples a gene uniformly; use a rate near `1/n`, never 1.0 |
+| `PolynomialMutation` | Real, Integer | `::new(probability, distribution_index)` — **default for Real/Integer** at `1/n`, eta=20 |
+| `GaussianMutation` | Real, Integer | `::new(probability, standard_deviation)` — symmetric normal perturbation (Box-Muller) |
+| `BitFlipMutation` | BitBinary | `::default()` or `{ probability }` — **default for BitBinary** at `1/n` |
 
 `::new` constructors take `Option<f64>` arguments (`None` uses the documented default).
+
+`MutationManager::new(solution_length)` installs all three defaults at the conventional `1/n`
+per-gene rate. A rate of 1.0 replaces the whole genome every generation — that is random search,
+not evolution — so override the rate only if you know why.
 
 ### 8. Per-Generation Inspection & Early Stop
 

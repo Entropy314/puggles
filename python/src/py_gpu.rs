@@ -54,7 +54,7 @@ fn gpu_evaluator_store() -> &'static Mutex<Option<Arc<GpuEvaluator>>> {
 
 /// Batch trampoline (Rust function pointer) for GPU evaluation.
 fn gpu_batch_trampoline(inputs: &Vec<Vec<f64>>) -> Vec<Vec<f64>> {
-    let guard = gpu_evaluator_store().lock().unwrap();
+    let guard = gpu_evaluator_store().lock().unwrap_or_else(|e| e.into_inner());
     guard
         .as_ref()
         .expect("GpuEvaluator not initialised — create GpuProblem before calling run()")
@@ -103,7 +103,7 @@ impl PyGpuProblem {
             solution_length,
             number_of_objectives,
         ));
-        *gpu_evaluator_store().lock().unwrap() = Some(Arc::clone(&evaluator));
+        *gpu_evaluator_store().lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&evaluator));
 
         // Placeholder single-eval function — never called; GPU uses the batch trampoline.
         fn placeholder(_: &Vec<f64>) -> Vec<f64> { Vec::new() }

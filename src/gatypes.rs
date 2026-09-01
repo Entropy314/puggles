@@ -124,11 +124,10 @@ mod tests {
     fn test_integer_generation_without_bounds() {
         let mut rng = SmallRng::seed_from_u64(0);
         let integer = Integer::new(None, None);
-        for _ in 0..100 {
-            let value = integer.generate_value(&mut rng).unwrap();
-            // Just test that a value is generated; range is too large to test accurately
-            assert!(value >= i64::MIN && value <= i64::MAX);
-        }
+        // Any i64 is in range, so the only meaningful property is that generation succeeds
+        // and does not keep returning the same value.
+        let values: Vec<i64> = (0..100).map(|_| integer.generate_value(&mut rng).unwrap()).collect();
+        assert!(values.iter().any(|&v| v != values[0]), "unbounded generation is not random");
     }
 
     #[test]

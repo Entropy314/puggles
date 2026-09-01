@@ -15,17 +15,10 @@ impl Dominance for ParetoDominance {
         let problem: &Problem = &solution_1.problem;
         let n_objectives = problem.number_of_objectives;
 
-        // Constraint-based dominance: fewer violations wins
-        if let Some(ref constraints) = &problem.objective_constraint {
-            if !constraints.is_empty() && solution_1.constraint_violation != solution_2.constraint_violation {
-                return match (solution_1.constraint_violation, solution_2.constraint_violation) {
-                    (0, _) => -1,
-                    (_, 0) => 1,
-                    (v1, v2) if v1 < v2 => -1,
-                    (v1, v2) if v1 > v2 => 1,
-                    _ => 0,
-                };
-            }
+        // Constraint-based dominance: fewer violations wins. Gated on `has_constraints()` so
+        // decision-variable constraints count too — they feed the same `constraint_violation`.
+        if problem.has_constraints() && solution_1.constraint_violation != solution_2.constraint_violation {
+            return if solution_1.constraint_violation < solution_2.constraint_violation { -1 } else { 1 };
         }
 
         let mut is_solution_1_better = false;
@@ -73,10 +66,7 @@ impl Dominance for ParetoDominance {
 // `Dominance` is ever added, guard the M=1 branch in `fast_non_dominated_sort` on it.
 fn single_objective_fronts(population: &[Solution]) -> Vec<Vec<usize>> {
     let problem = &population[0].problem;
-    let use_constraints = problem
-        .objective_constraint
-        .as_ref()
-        .map_or(false, |c| !c.is_empty());
+    let use_constraints = problem.has_constraints();
     // ParetoDominance only negates the objective when direction[0] == -1 (minimize); when
     // direction is None it does not negate (treats it as maximize). Mirror that exactly.
     let minimize = problem.direction.as_ref().map_or(false, |d| d[0] == -1);
@@ -137,11 +127,7 @@ pub fn fast_non_dominated_sort<D: Dominance + ?Sized>(
     // Constraint dominance (feasibility beats objectives) breaks Best-Order-Sort's
     // objective-sorted invariant, so constrained problems use ENS-SS (which folds constraint
     // violations into its sort key). The common unconstrained case uses Best-Order-Sort.
-    let use_constraints = population[0]
-        .problem
-        .objective_constraint
-        .as_ref()
-        .map_or(false, |c| !c.is_empty());
+    let use_constraints = population[0].problem.has_constraints();
     // Best-Order-Sort only pays off once the population is large enough — below ~N=200 its
     // per-objective sorted-list overhead makes ENS-SS faster (it's ~0.8× at N=100), while it
     // grows to ~1.4× at N=500 and ~2.3× at N=4000. Route small sorts to ENS so there is never a
@@ -159,10 +145,7 @@ pub fn fast_non_dominated_sort<D: Dominance + ?Sized>(
 fn ens_ss_fronts<D: Dominance + ?Sized>(population: &[Solution], dominance: &D) -> Vec<Vec<usize>> {
     let n = population.len();
     let problem = &population[0].problem;
-    let use_constraints = problem
-        .objective_constraint
-        .as_ref()
-        .map_or(false, |c| !c.is_empty());
+    let use_constraints = problem.has_constraints();
     let n_obj = problem.number_of_objectives;
     let signs: Vec<f64> = (0..n_obj)
         .map(|m| match &problem.direction {

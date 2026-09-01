@@ -15,12 +15,19 @@ pub struct MutationManager {
 }
 
 impl MutationManager {
-    /// Creates a new MutationManager with default mutations
-    pub fn new() -> Self {
+    /// Standard NSGA-II defaults for a problem with `solution_length` decision variables:
+    /// polynomial mutation (eta=20) for Real and Integer genes and bit-flip for BitBinary,
+    /// all at the conventional per-gene rate `1/n`.
+    ///
+    /// The rate has to be `1/n`, not 1.0: mutating every gene each generation replaces the
+    /// whole genome with a fresh random one, which is random search, not evolution.
+    pub fn new(solution_length: usize) -> Self {
+        let rate = 1.0 / solution_length.max(1) as f64;
+        let polynomial: Arc<dyn Mutation> = Arc::new(PolynomialMutation::new(Some(rate), Some(20.0)));
         let mut default_mutations: HashMap<&'static str, Arc<dyn Mutation>> = HashMap::new();
-        default_mutations.insert("BitBinary", Arc::new(BitFlipMutation::default()));
-        default_mutations.insert("Real", Arc::new(UniformMutation::default()));
-        default_mutations.insert("Integer", Arc::new(UniformMutation::default()));
+        default_mutations.insert("BitBinary", Arc::new(BitFlipMutation { probability: rate }));
+        default_mutations.insert("Real", Arc::clone(&polynomial));
+        default_mutations.insert("Integer", polynomial);
 
         Self { default_mutations }
     }
@@ -86,8 +93,10 @@ pub struct BitFlipMutation {
 }
 
 impl Default for BitFlipMutation {
+    /// Conservative standalone default. The GA uses `MutationManager::new(n)`, which sets the
+    /// conventional `1/n` rate instead.
     fn default() -> Self {
-        Self { probability: 0.5 }
+        Self { probability: 0.1 }
     }
 }
 
@@ -233,8 +242,12 @@ impl Mutation for GaussianMutation {
             .unwrap_or(f64::MAX);
 
         if rng.gen::<f64>() < self.probability {
-            (parent.solution[index] + rng.gen::<f64>() * self.standard_deviation)
-                .clamp(lower_bound, upper_bound)
+            // Box-Muller: two uniforms -> one standard normal. `rand`'s uniform is [0,1), so
+            // clamp u1 off zero before the log.
+            let u1: f64 = rng.gen::<f64>().max(f64::MIN_POSITIVE);
+            let u2: f64 = rng.gen();
+            let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+            (parent.solution[index] + z * self.standard_deviation).clamp(lower_bound, upper_bound)
         } else {
             parent.solution[index]
         }
@@ -282,22 +295,30 @@ mod tests {
     }
 
 
-     #[test]
+    /// The defaults must mutate *sparingly* — around 1/n of the genes per call. Mutating every
+    /// gene rebuilds the genome from scratch each generation, which is random search; that was
+    /// the original defect here, and the old version of this test asserted it.
+    #[test]
     fn test_default_mutation_manager() {
         let problem = Arc::new(setup_problem());
-
         let parent = setup_solution(Arc::clone(&problem));
-        {
-            let mutation_manager = MutationManager::new();
-            let child = mutation_manager.mutate(&parent, &mut test_rng());
-            println!(" Parent: {:?}", parent.solution);
-            println!(" Child: {:?}", child.solution);
-            assert!(child.solution[0] == 0.0 || child.solution[0] == 1.0);
-            assert!(child.solution[1] != parent.solution[1]);
-            assert!(child.solution[2] != parent.solution[2]);
-            assert!(child.solution[3] != parent.solution[3]);
-            assert!(child.solution[4] != parent.solution[4]);
+        let mutation_manager = MutationManager::new(problem.solution_length);
+        let mut rng = test_rng();
+
+        let n = problem.solution_length; // 5 genes -> expected rate 1/5
+        let trials = 400;
+        let mut changed = 0usize;
+        for _ in 0..trials {
+            let child = mutation_manager.mutate(&parent, &mut rng);
+            assert!(child.solution[0] == 0.0 || child.solution[0] == 1.0, "binary gene stays a bit");
+            changed += (0..n).filter(|&i| child.solution[i] != parent.solution[i]).count();
         }
+        let rate = changed as f64 / (trials * n) as f64;
+        assert!(
+            rate > 0.05 && rate < 0.45,
+            "per-gene mutation rate {rate:.3} should sit near 1/n = {:.3}, not ~0 or ~1",
+            1.0 / n as f64
+        );
     }
 
     #[test]

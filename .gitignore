@@ -22,3 +22,6 @@ dist/
 
 # Datasets
 *.csv
+# Build artifacts
+python/target/
+dist/

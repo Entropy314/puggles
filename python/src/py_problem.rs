@@ -35,8 +35,8 @@ fn active_problem_id() -> &'static Mutex<u64> {
 /// Trampoline function matching `fn(&Vec<f64>) -> Vec<f64>`.
 /// Looks up the Python callable from the global registry and calls it via the GIL.
 fn python_objective_trampoline(input: &Vec<f64>) -> Vec<f64> {
-    let problem_id = *active_problem_id().lock().unwrap();
-    let registry = callable_registry().lock().unwrap();
+    let problem_id = *active_problem_id().lock().unwrap_or_else(|e| e.into_inner());
+    let registry = callable_registry().lock().unwrap_or_else(|e| e.into_inner());
     let callable = registry
         .get(&problem_id)
         .expect("Python callable not found in registry — was the Problem dropped?");
@@ -53,7 +53,7 @@ fn python_objective_trampoline(input: &Vec<f64>) -> Vec<f64> {
 
 /// Set the active problem ID before a run. Called by PyNSGAII.
 pub fn set_active_problem_id(id: u64) {
-    *active_problem_id().lock().unwrap() = id;
+    *active_problem_id().lock().unwrap_or_else(|e| e.into_inner()) = id;
 }
 
 // ---------------------------------------------------------------------------
@@ -73,8 +73,8 @@ fn active_batch_problem_id() -> &'static Mutex<u64> {
 /// Batch trampoline: calls `f(population: List[List[float]]) -> List[List[float]]`.
 /// The Python function can use multiprocessing / ProcessPoolExecutor internally.
 fn python_batch_objective_trampoline(inputs: &Vec<Vec<f64>>) -> Vec<Vec<f64>> {
-    let problem_id = *active_batch_problem_id().lock().unwrap();
-    let registry = batch_callable_registry().lock().unwrap();
+    let problem_id = *active_batch_problem_id().lock().unwrap_or_else(|e| e.into_inner());
+    let registry = batch_callable_registry().lock().unwrap_or_else(|e| e.into_inner());
     let callable = registry
         .get(&problem_id)
         .expect("Python batch callable not found in registry — was the Problem dropped?");
@@ -95,7 +95,7 @@ fn python_batch_objective_trampoline(inputs: &Vec<Vec<f64>>) -> Vec<Vec<f64>> {
 }
 
 pub fn set_active_batch_problem_id(id: u64) {
-    *active_batch_problem_id().lock().unwrap() = id;
+    *active_batch_problem_id().lock().unwrap_or_else(|e| e.into_inner()) = id;
 }
 
 // ---------------------------------------------------------------------------
@@ -116,13 +116,13 @@ impl Drop for ProblemStore {
         if self.uses_python_callable {
             callable_registry()
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .remove(&self.problem_id);
         }
         if self.uses_batch_callable {
             batch_callable_registry()
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .remove(&self.problem_id);
         }
     }
@@ -185,7 +185,7 @@ impl PyProblem {
             // A no-op single-eval function is required by Problem::new but will never be called.
             batch_callable_registry()
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .insert(problem_id, batch_fn.into_pyobject(py).unwrap().into());
 
             fn placeholder(_: &Vec<f64>) -> Vec<f64> { Vec::new() }
@@ -219,7 +219,7 @@ impl PyProblem {
         })?;
         callable_registry()
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(problem_id, obj_fn.into_pyobject(py).unwrap().into());
 
         let problem = Problem::new(

@@ -5,6 +5,7 @@ use pyo3::prelude::*;
 /// Selects which crossover strategy to use for each variable type.
 /// Available real crossovers: "sbx" (default), "de", "blend", "pcx", "undx"
 /// Available integer/binary crossovers: "uniform" (default), "arithmetic"
+/// `uniform_probability` is the per-gene swap probability (default 0.5).
 #[pyclass(name = "CrossoverConfig")]
 #[derive(Clone, Debug)]
 pub struct PyCrossoverConfig {
@@ -25,7 +26,7 @@ pub struct PyCrossoverConfig {
     #[pyo3(get, set)]
     pub blend_alpha: f64,
     #[pyo3(get, set)]
-    pub uniform_probability: f64,
+    pub uniform_probability: Option<f64>,
 }
 
 #[pymethods]
@@ -40,7 +41,7 @@ impl PyCrossoverConfig {
         de_probability = 0.9,
         de_scaling_factor = 0.8,
         blend_alpha = 0.5,
-        uniform_probability = 1.0,
+        uniform_probability = None,
     ))]
     fn new(
         real_crossover: &str,
@@ -51,7 +52,7 @@ impl PyCrossoverConfig {
         de_probability: f64,
         de_scaling_factor: f64,
         blend_alpha: f64,
-        uniform_probability: f64,
+        uniform_probability: Option<f64>,
     ) -> Self {
         PyCrossoverConfig {
             real_crossover: real_crossover.to_string(),
@@ -87,8 +88,9 @@ pub struct PyMutationConfig {
     pub integer_mutation: String,
     #[pyo3(get, set)]
     pub binary_mutation: String,
+    /// Per-gene mutation rate. `None` = the conventional 1/n (n = number of decision variables).
     #[pyo3(get, set)]
-    pub probability: f64,
+    pub probability: Option<f64>,
     #[pyo3(get, set)]
     pub polynomial_distribution_index: f64,
     #[pyo3(get, set)]
@@ -99,10 +101,10 @@ pub struct PyMutationConfig {
 impl PyMutationConfig {
     #[new]
     #[pyo3(signature = (
-        real_mutation = "uniform",
-        integer_mutation = "uniform",
+        real_mutation = "polynomial",
+        integer_mutation = "polynomial",
         binary_mutation = "bitflip",
-        probability = 1.0,
+        probability = None,
         polynomial_distribution_index = 20.0,
         gaussian_std_dev = 0.1,
     ))]
@@ -110,7 +112,7 @@ impl PyMutationConfig {
         real_mutation: &str,
         integer_mutation: &str,
         binary_mutation: &str,
-        probability: f64,
+        probability: Option<f64>,
         polynomial_distribution_index: f64,
         gaussian_std_dev: f64,
     ) -> Self {

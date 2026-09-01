@@ -163,7 +163,7 @@ impl PyNSGAII {
         let mutation_manager = self
             .mutation_config
             .as_ref()
-            .map(|cfg| build_mutation_manager(&cfg.borrow(py)));
+            .map(|cfg| build_mutation_manager(&cfg.borrow(py), store.problem.solution_length));
 
         let needs_gil =
             store.uses_python_callable || store.uses_batch_callable || callback.is_some();
@@ -268,6 +268,8 @@ impl PyNSGAII {
 // Config → manager builder helpers
 // ---------------------------------------------------------------------------
 
+/// `uniform_probability` is the per-gene *swap* probability — 1.0 swaps every gene, which
+/// merely exchanges the parents. Defaults to the textbook 0.5.
 fn build_crossover_manager(cfg: &PyCrossoverConfig) -> CrossoverManager {
     let mut mgr = CrossoverManager::new();
 
@@ -299,18 +301,13 @@ fn build_crossover_manager(cfg: &PyCrossoverConfig) -> CrossoverManager {
         )),
     };
 
+    let swap = cfg.uniform_probability.unwrap_or(0.5);
     let integer: Box<dyn Crossover + Send> = match cfg.integer_crossover.as_str() {
-        "arithmetic" => Box::new(ArithmeticCrossover {
-            probability: cfg.uniform_probability,
-        }),
-        _ => Box::new(UniformCrossover {
-            probability: cfg.uniform_probability,
-        }),
+        "arithmetic" => Box::new(ArithmeticCrossover { probability: swap }),
+        _ => Box::new(UniformCrossover { probability: swap }),
     };
 
-    let binary: Box<dyn Crossover + Send> = Box::new(UniformCrossover {
-        probability: cfg.uniform_probability,
-    });
+    let binary: Box<dyn Crossover + Send> = Box::new(UniformCrossover { probability: swap });
 
     mgr.set_default_real_crossover(real);
     mgr.set_default_integer_crossover(integer);
@@ -318,39 +315,32 @@ fn build_crossover_manager(cfg: &PyCrossoverConfig) -> CrossoverManager {
     mgr
 }
 
-fn build_mutation_manager(cfg: &PyMutationConfig) -> MutationManager {
-    let mut mgr = MutationManager::new();
+/// Build a manager from a Python config. Starts from `MutationManager::new(n)` (the correct
+/// NSGA-II defaults) and overrides only what the config explicitly names — `probability = None`
+/// keeps the conventional 1/n rate rather than mutating every gene.
+fn build_mutation_manager(cfg: &PyMutationConfig, n: usize) -> MutationManager {
+    let mut mgr = MutationManager::new(n);
+    let rate = cfg.probability.unwrap_or(1.0 / n.max(1) as f64);
 
     let real: Arc<dyn Mutation> = match cfg.real_mutation.as_str() {
-        "polynomial" => Arc::new(PolynomialMutation::new(
-            Some(cfg.probability),
+        "gaussian" => Arc::new(GaussianMutation::new(Some(rate), Some(cfg.gaussian_std_dev))),
+        "uniform" => Arc::new(UniformMutation { probability: rate }),
+        _ => Arc::new(PolynomialMutation::new(
+            Some(rate),
             Some(cfg.polynomial_distribution_index),
         )),
-        "gaussian" => Arc::new(GaussianMutation::new(
-            Some(cfg.probability),
-            Some(cfg.gaussian_std_dev),
-        )),
-        _ => Arc::new(UniformMutation {
-            probability: cfg.probability,
-        }),
     };
 
     let integer: Arc<dyn Mutation> = match cfg.integer_mutation.as_str() {
-        "polynomial" => Arc::new(PolynomialMutation::new(
-            Some(cfg.probability),
+        "uniform" => Arc::new(UniformMutation { probability: rate }),
+        _ => Arc::new(PolynomialMutation::new(
+            Some(rate),
             Some(cfg.polynomial_distribution_index),
         )),
-        _ => Arc::new(UniformMutation {
-            probability: cfg.probability,
-        }),
     };
-
-    let binary: Arc<dyn Mutation> = Arc::new(BitFlipMutation {
-        probability: cfg.probability,
-    });
 
     mgr.set_default_real_mutation(real);
     mgr.set_default_integer_mutation(integer);
-    mgr.set_default_binary_mutation(binary);
+    mgr.set_default_binary_mutation(Arc::new(BitFlipMutation { probability: rate }));
     mgr
 }

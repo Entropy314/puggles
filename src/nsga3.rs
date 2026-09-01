@@ -14,7 +14,7 @@ use crate::core::{Problem, Solution};
 use crate::dominance::{crowding_distance, fast_non_dominated_sort, ParetoDominance};
 use crate::genetic_algorithms_v2::ExecutionMode;
 use crate::genetic_operators::crossover::CrossoverManager;
-use crate::genetic_operators::mutation::{MutationManager, PolynomialMutation};
+use crate::genetic_operators::mutation::MutationManager;
 use crate::genetic_operators::selectors::CrowdingTournamentSelector;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
@@ -69,14 +69,18 @@ impl NSGAIII {
     pub fn new(problem: Arc<Problem>, population_size: usize, divisions: usize, execution_mode: ExecutionMode) -> Self {
         let n = problem.solution_length;
         let m = problem.number_of_objectives;
-        let mut mutation_manager = MutationManager::new();
-        mutation_manager.set_default_real_mutation(Arc::new(PolynomialMutation::new(Some(1.0 / n as f64), Some(20.0))));
+        let mutation_manager = MutationManager::new(n);
         let reference_points = das_dennis(m, divisions);
         let population_size = if population_size == 0 {
             (reference_points.len() + 3) / 4 * 4
         } else {
             population_size
         };
+        assert!(
+            population_size > 0,
+            "population_size must be > 0 (a zero population produces no offspring, so a run \
+             can never spend its evaluation budget)"
+        );
         Self {
             problem,
             population_size,
@@ -148,26 +152,30 @@ impl NSGAIII {
         self.evaluate(&mut pop);
         self.population = pop;
 
+        self.archive = self.nondominated(&self.population);
         while self.nfe.load(Ordering::Relaxed) < max_nfe {
-            self.iterate();
+            let remaining = max_nfe - self.nfe.load(Ordering::Relaxed);
+            self.iterate_n(remaining.min(self.population_size));
         }
         self.archive = self.nondominated(&self.population);
     }
 
-    fn iterate(&mut self) {
+    /// Run one generation, creating at most `max_offspring` new solutions, so `run` can honour
+    /// its NFE budget exactly instead of overshooting by up to a full population.
+    fn iterate_n(&mut self, max_offspring: usize) {
         // Parent selection by rank + crowding tournament (crowding is cheap and harmless).
         self.assign_fitness();
         let parent_indices = self.selector.select_indices(self.population_size, &self.ranks, &self.crowding);
         let parents: Vec<Solution> = parent_indices.iter().map(|&i| self.population[i].clone()).collect();
 
-        let mut offspring: Vec<Solution> = Vec::with_capacity(self.population_size);
+        let mut offspring: Vec<Solution> = Vec::with_capacity(max_offspring);
         let mut i = 0;
-        while offspring.len() < self.population_size {
+        while offspring.len() < max_offspring {
             let p1 = &parents[i % parents.len()];
             let p2 = &parents[(i + 1) % parents.len()];
             i += 2;
             for child in self.crossover_manager.perform_crossover(p1, p2, &mut self.rng) {
-                if offspring.len() < self.population_size {
+                if offspring.len() < max_offspring {
                     offspring.push(self.mutation_manager.mutate(&child, &mut self.rng));
                 }
             }

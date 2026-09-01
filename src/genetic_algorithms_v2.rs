@@ -2,7 +2,7 @@ use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use crate::core::{EvalFn, Problem, Solution};
-use crate::genetic_operators::mutation::{MutationManager, PolynomialMutation};
+use crate::genetic_operators::mutation::MutationManager;
 use crate::genetic_operators::crossover::CrossoverManager;
 use crate::genetic_operators::selectors::CrowdingTournamentSelector;
 use crate::dominance::{ParetoDominance, fast_non_dominated_sort, crowding_distance};
@@ -57,12 +57,13 @@ impl NSGAII {
         population_size: usize,
         execution_mode: ExecutionMode,
     ) -> Self {
+        assert!(
+            population_size > 0,
+            "population_size must be > 0 (a zero population produces no offspring, so a run \
+             can never spend its evaluation budget)"
+        );
         let n = problem.solution_length;
-        let mut mutation_manager = MutationManager::new();
-        mutation_manager.set_default_real_mutation(Arc::new(PolynomialMutation::new(
-            Some(1.0 / n as f64),
-            Some(20.0),
-        )));
+        let mutation_manager = MutationManager::new(n);
         Self {
             problem,
             population_size,
@@ -307,14 +308,23 @@ impl NSGAII {
         self.population = self.environmental_selection(combined, self.population_size);
     }
 
-    /// Run for at most `max_nfe` evaluations OR until `time_limit` elapses, whichever comes first.
-    pub fn run_timed(&mut self, max_nfe: usize, time_limit: std::time::Duration) {
+    /// Initialize (if needed), evaluate the starting population, and archive it. Shared by
+    /// `run`, `run_timed`, and `run_until_converged` — archiving here is what makes a budget
+    /// smaller than the population still return results instead of an empty archive.
+    fn prime(&mut self) {
         if self.population.is_empty() {
             self.initialize();
         }
         let mut pop = std::mem::take(&mut self.population);
         self.evaluate_population(&mut pop);
         self.population = pop;
+        self.assign_fitness();
+        self.update_archive();
+    }
+
+    /// Run for at most `max_nfe` evaluations OR until `time_limit` elapses, whichever comes first.
+    pub fn run_timed(&mut self, max_nfe: usize, time_limit: std::time::Duration) {
+        self.prime();
         let start = std::time::Instant::now();
         while self.nfe.load(Ordering::Relaxed) < max_nfe && start.elapsed() < time_limit {
             let remaining = max_nfe - self.nfe.load(Ordering::Relaxed);
@@ -332,12 +342,7 @@ impl NSGAII {
     /// front *extent*, not spread. Swap in a hypervolume plateau (see `metrics`) if you
     /// need diversity-aware stopping.
     pub fn run_until_converged(&mut self, max_nfe: usize, patience: usize, epsilon: f64) -> usize {
-        if self.population.is_empty() {
-            self.initialize();
-        }
-        let mut pop = std::mem::take(&mut self.population);
-        self.evaluate_population(&mut pop);
-        self.population = pop;
+        self.prime();
 
         let n_obj = self.problem.number_of_objectives;
         let dirs = self.problem.direction.clone().unwrap_or_else(|| vec![-1; n_obj]);
@@ -483,15 +488,7 @@ impl NSGAII {
     }
 
     pub fn run(&mut self, max_nfe: usize) {
-        // Issue 6: auto-initialize if population is empty
-        if self.population.is_empty() {
-            self.initialize();
-        }
-
-        let mut pop = std::mem::take(&mut self.population);
-        self.evaluate_population(&mut pop);
-        self.population = pop;
-
+        self.prime();
         while self.nfe.load(Ordering::Relaxed) < max_nfe {
             let remaining = max_nfe - self.nfe.load(Ordering::Relaxed);
             self.iterate_n(remaining.min(self.population_size));
@@ -508,6 +505,50 @@ mod tests {
     use crate::gatypes::SolutionDataTypes;
     use crate::gatypes::{BitBinary, Integer, Real};
     use crate::benchmark_objective_functions::parabloid_5_loc;
+    use std::collections::HashSet;
+    use std::sync::{LazyLock, Mutex};
+    use std::thread::{self, ThreadId};
+    use std::time::Duration;
+
+    static EVALUATION_THREADS: LazyLock<Mutex<HashSet<ThreadId>>> =
+        LazyLock::new(|| Mutex::new(HashSet::new()));
+
+    fn record_evaluation_thread(x: &Vec<f64>) -> Vec<f64> {
+        EVALUATION_THREADS
+            .lock()
+            .expect("evaluation thread recorder was poisoned")
+            .insert(thread::current().id());
+        // Keep jobs in flight long enough for both Rayon workers to receive work.
+        thread::sleep(Duration::from_millis(2));
+        vec![x.iter().sum()]
+    }
+
+    fn setup_thread_recording_problem() -> Problem {
+        Problem {
+            solution_length: 1,
+            number_of_objectives: 1,
+            objective_constraint: None,
+            objective_constraint_operands: None,
+            direction: Some(vec![-1]),
+            solution_data_types: vec![SolutionDataTypes::Real(Real::new(Some(-1.0), Some(1.0)))],
+            variable_constraints: None,
+            eval_fn: EvalFn::Single(record_evaluation_thread),
+        }
+    }
+
+    fn clear_evaluation_threads() {
+        EVALUATION_THREADS
+            .lock()
+            .expect("evaluation thread recorder was poisoned")
+            .clear();
+    }
+
+    fn recorded_thread_count() -> usize {
+        EVALUATION_THREADS
+            .lock()
+            .expect("evaluation thread recorder was poisoned")
+            .len()
+    }
 
     fn setup_single_objective_problem() -> Problem {
         Problem {
@@ -581,6 +622,33 @@ mod tests {
         let mut ga = NSGAII::new(Arc::clone(&problem), 50, ExecutionMode::MultiThreaded);
         ga.initialize();
         assert_eq!(ga.population.len(), 50);
+    }
+
+    #[test]
+    fn test_execution_modes_use_expected_evaluation_threads() {
+        let problem = Arc::new(setup_thread_recording_problem());
+
+        clear_evaluation_threads();
+        let mut sequential = NSGAII::new(Arc::clone(&problem), 64, ExecutionMode::Sequential);
+        sequential.run(64);
+        assert_eq!(
+            recorded_thread_count(),
+            1,
+            "sequential mode must use one evaluation thread"
+        );
+
+        clear_evaluation_threads();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+        let mut parallel = NSGAII::new(problem, 64, ExecutionMode::MultiThreaded);
+        pool.install(|| parallel.run(64));
+        assert_eq!(
+            recorded_thread_count(),
+            2,
+            "parallel mode must use both Rayon workers"
+        );
     }
 
     #[test]

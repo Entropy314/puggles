@@ -105,7 +105,7 @@ class CrossoverConfig:
     de_probability: float
     de_scaling_factor: float
     blend_alpha: float
-    uniform_probability: float
+    uniform_probability: Optional[float]
     def __init__(
         self,
         real_crossover: str = "sbx",
@@ -116,22 +116,22 @@ class CrossoverConfig:
         de_probability: float = 0.9,
         de_scaling_factor: float = 0.8,
         blend_alpha: float = 0.5,
-        uniform_probability: float = 1.0,
+        uniform_probability: Optional[float] = None,
     ) -> None: ...
 
 class MutationConfig:
     real_mutation: str
     integer_mutation: str
     binary_mutation: str
-    probability: float
+    probability: Optional[float]
     polynomial_distribution_index: float
     gaussian_std_dev: float
     def __init__(
         self,
-        real_mutation: str = "uniform",
-        integer_mutation: str = "uniform",
+        real_mutation: str = "polynomial",
+        integer_mutation: str = "polynomial",
         binary_mutation: str = "bitflip",
-        probability: float = 1.0,
+        probability: Optional[float] = None,
         polynomial_distribution_index: float = 20.0,
         gaussian_std_dev: float = 0.1,
     ) -> None: ...

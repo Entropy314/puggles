@@ -2,7 +2,7 @@
 
 A multi-objective evolutionary optimization library written in Rust. Implements NSGA-II (Non-dominated Sorting Genetic Algorithm II) for solving single- and multi-objective optimization problems over continuous, integer, and binary decision variables, with optional constraint handling, parallel (Rayon) evaluation, and optional GPU acceleration.
 
-> **Python bindings:** temporarily removed. They are being reimplemented in a later PR. This branch is Rust-only.
+> **Python bindings:** in `python/`. Build with `cd python && maturin develop --release`.
 >
 > **Full documentation:** see [GUIDE.md](GUIDE.md) for walkthroughs, the complete API, and configuration reference.
 
