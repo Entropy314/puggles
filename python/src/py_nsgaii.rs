@@ -70,6 +70,7 @@ pub struct PyNSGAII {
     crossover_config: Option<Py<PyCrossoverConfig>>,
     mutation_config: Option<Py<PyMutationConfig>>,
     num_threads: Option<usize>,
+    seed: Option<u64>,
     last_archive: Vec<PySolution>,
     last_population: Vec<PySolution>,
     last_nfe: usize,
@@ -88,6 +89,11 @@ impl PyNSGAII {
     ///     crossover_config: Optional CrossoverConfig to customise crossover operators.
     ///     mutation_config: Optional MutationConfig to customise mutation operators.
     ///     num_threads: Optional Rayon thread count (default: all logical CPUs).
+    ///     seed: Optional u64 seeding every source of randomness (initial population,
+    ///           crossover, mutation, selection). The same seed reproduces a run exactly.
+    ///           `None` draws fresh entropy, so runs differ. Note that `multithreaded`
+    ///           mode is not deterministic even with a seed, because Rayon interleaves
+    ///           evaluations non-deterministically — pair `seed` with "sequential".
     #[new]
     #[pyo3(signature = (
         problem,
@@ -96,6 +102,7 @@ impl PyNSGAII {
         crossover_config = None,
         mutation_config = None,
         num_threads = None,
+        seed = None,
     ))]
     fn new(
         problem: PyObject,
@@ -104,6 +111,7 @@ impl PyNSGAII {
         crossover_config: Option<Py<PyCrossoverConfig>>,
         mutation_config: Option<Py<PyMutationConfig>>,
         num_threads: Option<usize>,
+        seed: Option<u64>,
     ) -> Self {
         let mode = match execution_mode {
             "multithreaded" => ExecutionMode::MultiThreaded,
@@ -117,6 +125,7 @@ impl PyNSGAII {
             crossover_config,
             mutation_config,
             num_threads,
+            seed,
             last_archive: Vec::new(),
             last_population: Vec::new(),
             last_nfe: 0,
@@ -170,6 +179,9 @@ impl PyNSGAII {
 
         if needs_gil {
             let mut ga = NSGAII::new(Arc::clone(&store.problem), self.population_size, effective_mode);
+            if let Some(s) = self.seed {
+                ga = ga.with_seed(s);
+            }
             if let Some(cm) = crossover_manager {
                 ga.crossover_manager = cm;
             }
@@ -215,9 +227,13 @@ impl PyNSGAII {
             let problem = Arc::clone(&store.problem);
             let pop_size = self.population_size;
             let mode = effective_mode;
+            let seed = self.seed;
 
             let (archive, population, nfe) = py.allow_threads(move || {
                 let mut ga = NSGAII::new(problem, pop_size, mode);
+                if let Some(s) = seed {
+                    ga = ga.with_seed(s);
+                }
                 if let Some(cm) = crossover_manager {
                     ga.crossover_manager = cm;
                 }

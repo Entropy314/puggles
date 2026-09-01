@@ -28,7 +28,7 @@ problem = pg.Problem(
     direction=[-1, -1],          # -1 = minimize, 1 = maximize
 )
 
-ga = pg.NSGAII(problem, population_size=100)
+ga = pg.NSGAII(problem, population_size=100, seed=42)
 ga.run(10_000)                   # budget in objective-function evaluations
 
 for s in ga.get_archive():       # the Pareto front
@@ -57,13 +57,31 @@ against pymoo's 0.076.
 - **Constraints** — objective bounds and decision-variable `g(x) <= 0`
 - **Batch objectives** — `batch_objective_function=f` evaluates a whole population per call,
   amortizing the GIL. ~1.8× on an expensive objective; a wash on a cheap one.
+- **Reproducible runs** — `seed=42` fixes the initial population, crossover, mutation, and
+  selection, so a run repeats exactly. Omit it for fresh randomness each time.
 - **GPU evaluation** via `GpuProblem` and a WGSL compute shader (experimental)
 - Built-in DTLZ1–7 benchmark problems
+
+## Reproducibility
+
+A genetic algorithm is randomised: without a seed, two runs of identical code give different
+answers (on ZDT1, roughly 10% apart in IGD). Pass a seed to make a run exactly repeatable —
+essential for publishing a result, writing a regression test, or comparing two parameter
+settings without measuring noise.
+
+```python
+a = pg.NSGAII(problem, seed=42); a.run(10_000)
+b = pg.NSGAII(problem, seed=42); b.run(10_000)
+# a and b produce identical fronts, down to the last bit
+```
+
+Seeding applies to `NSGAIII` too. Use it with `execution_mode="sequential"`: multithreaded runs
+interleave evaluations non-deterministically, so they are not reproducible even when seeded.
 
 ## Many objectives
 
 ```python
-ga = pg.NSGAIII(problem, divisions=12)   # population derived from the reference points
+ga = pg.NSGAIII(problem, divisions=12, seed=42)   # population derived from the reference points
 ga.run(20_000)
 ```
 
@@ -85,9 +103,8 @@ search, not evolution.
 ## Status
 
 The NSGA-II core across all three encodings is well tested and benchmarked. The GPU evaluator is
-experimental and untested in CI. Runs are not yet seeded from Python, so results vary between
-invocations; and one Python-callable problem may be optimized at a time per process (concurrent
-GAs over different Python objectives in threads are not supported).
+experimental and untested in CI. One Python-callable problem may be optimized at a time per
+process — concurrent GAs over different Python objectives in threads are not supported.
 
 ## Links
 

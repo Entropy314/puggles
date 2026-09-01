@@ -72,6 +72,7 @@ class NSGAII:
         crossover_config: Optional["CrossoverConfig"] = None,
         mutation_config: Optional["MutationConfig"] = None,
         num_threads: Optional[int] = None,
+        seed: Optional[int] = None,
     ) -> None: ...
     def run(
         self,
@@ -93,6 +94,7 @@ class NSGAIII:
         population_size: int = 0,
         divisions: int = 12,
         execution_mode: str = "sequential",
+        seed: Optional[int] = None,
     ) -> None: ...
     def run(self, max_nfe: int) -> None: ...
     def get_archive(self) -> List[Solution]: ...

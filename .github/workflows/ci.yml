@@ -57,8 +57,17 @@ jobs:
               objective_function=lambda x: [x[0], 1.0 - x[0]],
               direction=[-1, -1],
           )
-          ga = pg.NSGAII(problem, population_size=50, execution_mode="sequential")
-          ga.run(2000)
-          assert ga.get_archive(), "empty archive"
-          print("ok", ga.nfe, len(ga.get_archive()))
+          def front(**kw):
+              ga = pg.NSGAII(problem, population_size=50, execution_mode="sequential", **kw)
+              ga.run(2000)
+              return [tuple(s.objectives) for s in ga.get_archive()]
+
+          assert front(), "empty archive"
+
+          # Seeding must reproduce a run exactly, and must not silently pin unseeded runs.
+          assert front(seed=1) == front(seed=1), "seeded runs are not reproducible"
+          assert front(seed=1) != front(seed=2), "different seeds gave identical runs"
+          assert front() != front(), "unseeded runs are deterministic — seed leaked in"
+
+          print("ok", len(front(seed=1)), "solutions; seeding verified")
           SMOKE

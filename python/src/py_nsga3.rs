@@ -16,6 +16,7 @@ pub struct PyNSGAIII {
     population_size: usize,
     divisions: usize,
     execution_mode: ExecutionMode,
+    seed: Option<u64>,
     last_archive: Vec<PySolution>,
     last_population: Vec<PySolution>,
     last_nfe: usize,
@@ -31,9 +32,12 @@ impl PyNSGAIII {
     ///     divisions: Reference-point density (e.g. 12 for 3 objectives → 91 points).
     ///     execution_mode: "sequential", "multithreaded", or "gpu" (default "sequential"). A
     ///                     Python-callable objective always runs Sequential (GIL).
+    ///     seed: Optional u64 seeding every source of randomness, so the same seed reproduces
+    ///           a run exactly. `None` draws fresh entropy. Pair it with "sequential" —
+    ///           "multithreaded" is not deterministic even when seeded.
     #[new]
-    #[pyo3(signature = (problem, population_size = 0, divisions = 12, execution_mode = "sequential"))]
-    fn new(problem: PyObject, population_size: usize, divisions: usize, execution_mode: &str) -> Self {
+    #[pyo3(signature = (problem, population_size = 0, divisions = 12, execution_mode = "sequential", seed = None))]
+    fn new(problem: PyObject, population_size: usize, divisions: usize, execution_mode: &str, seed: Option<u64>) -> Self {
         let mode = match execution_mode {
             "multithreaded" => ExecutionMode::MultiThreaded,
             "gpu" => ExecutionMode::GPU,
@@ -44,6 +48,7 @@ impl PyNSGAIII {
             population_size,
             divisions,
             execution_mode: mode,
+            seed,
             last_archive: Vec::new(),
             last_population: Vec::new(),
             last_nfe: 0,
@@ -70,10 +75,14 @@ impl PyNSGAIII {
 
         let pop_size = self.population_size;
         let divisions = self.divisions;
+        let seed = self.seed;
 
         let (archive, population, nfe) = if store.uses_python_callable {
             // Hold the GIL: the objective trampoline calls back into Python.
             let mut ga = NSGAIII::new(Arc::clone(&store.problem), pop_size, divisions, mode);
+            if let Some(s) = seed {
+                ga = ga.with_seed(s);
+            }
             ga.run(max_nfe);
             (ga.get_archive().to_vec(), ga.population.clone(), ga.get_nfe())
         } else {
@@ -81,6 +90,9 @@ impl PyNSGAIII {
             let problem = Arc::clone(&store.problem);
             py.allow_threads(move || {
                 let mut ga = NSGAIII::new(problem, pop_size, divisions, mode);
+                if let Some(s) = seed {
+                    ga = ga.with_seed(s);
+                }
                 ga.run(max_nfe);
                 (ga.get_archive().to_vec(), ga.population.clone(), ga.get_nfe())
             })
