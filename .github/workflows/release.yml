@@ -22,7 +22,7 @@ on:
       targets:
         description: "Which registries to publish to"
         type: choice
-        default: pypi
+        default: testpypi
         options: [testpypi, pypi, crates-io, both]
 
 permissions:
@@ -105,6 +105,18 @@ jobs:
           path: dist
       - name: List artifacts
         run: ls -la dist
+      - name: Show the identity this job will claim
+        run: |
+          echo "Register a Trusted Publisher matching EXACTLY these values:"
+          echo "  Owner:            ${{ github.repository_owner }}"
+          echo "  Repository name:  ${{ github.event.repository.name }}"
+          echo "  Workflow name:    release.yml"
+          echo "  Environment name: release"
+          echo
+          echo "Uploading to: ${{ inputs.targets == 'testpypi' && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}"
+          echo "  -> the publisher must be registered on THAT host; pypi.org and test.pypi.org are separate."
+          echo
+          echo "full workflow ref: ${{ github.workflow_ref }}"
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: ${{ inputs.targets == 'testpypi' && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}
