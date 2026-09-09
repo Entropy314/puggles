@@ -1,5 +1,6 @@
 use crate::gatypes::SolutionDataTypes;
 use rand::rngs::SmallRng;
+use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -7,6 +8,44 @@ use std::sync::Arc;
 /// Objective/constraint value vectors — inline for the small objective counts (≤ 4) typical of
 /// multi-objective work, so a `Solution` clone allocates nothing for them (genes stay a `Vec`).
 pub type ObjVec = SmallVec<[f64; 4]>;
+
+/// An invalid-configuration error from a `try_new` constructor.
+///
+/// The panicking `new` constructors are thin wrappers over these, so Rust callers can keep the
+/// terse form while the Python bindings turn the same failure into a clean `ValueError` instead
+/// of surfacing a Rust panic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigError(String);
+
+impl ConfigError {
+    pub fn new(message: impl Into<String>) -> Self {
+        ConfigError(message.into())
+    }
+    pub fn message(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
+/// How a solution vector is structured, which decides how it is generated and varied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Encoding {
+    /// Each gene is independent and typed by its `SolutionDataTypes` entry. Crossover and
+    /// mutation act gene by gene. The default.
+    #[default]
+    PerGene,
+    /// The solution is a permutation of `0..solution_length`. Genes are not independent — the
+    /// whole vector must stay a permutation — so variation uses order crossover and swap
+    /// mutation instead of the per-gene operators.
+    Permutation,
+}
 
 /// Evaluation function discriminant: single-solution or batch.
 #[derive(Clone, Debug)]
@@ -28,9 +67,97 @@ pub struct Problem {
     /// `g` adds one to `constraint_violation`, so feasible solutions dominate infeasible
     /// ones just like the objective-bound constraints. `None` = unconstrained.
     pub variable_constraints: Option<Vec<fn(&Vec<f64>) -> f64>>,
+    /// How the solution vector is structured. Defaults to [`Encoding::PerGene`]; set
+    /// [`Encoding::Permutation`] via [`Problem::with_permutation_encoding`] for ordering
+    /// problems (TSP, scheduling).
+    pub encoding: Encoding,
 }
 
 impl Problem {
+    /// Fallible constructor. Returns [`ConfigError`] instead of panicking, so callers that
+    /// build a `Problem` from untrusted input (notably the Python bindings) can report a clean
+    /// error rather than unwinding a panic across the FFI boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new(
+        solution_length: usize,
+        number_of_objectives: usize,
+        objective_constraint: Option<Vec<Option<f64>>>, //number_of_objectives
+        objective_constraint_operands: Option<Vec<Option<String>>>, //number_of_objectives
+        direction: Option<Vec<i8>>,
+        solution_data_types: Vec<SolutionDataTypes>,// Vec of Binary or Integer or Real
+        objective_function: fn(&Vec<f64>) -> Vec<f64>
+    ) -> Result<Self, ConfigError> {
+        if solution_length != solution_data_types.len() {
+            return Err(ConfigError::new("solution_length does not match solution_data_types length"));
+        }
+
+        // Check if lengths match number_of_objectives
+        if let Some(ref constraints) = objective_constraint {
+            if constraints.len() != number_of_objectives {
+                return Err(ConfigError::new("objective_constraint length does not match number_of_objectives"));
+            }
+        }
+
+        if let Some(ref operands) = objective_constraint_operands {
+            if operands.len() != number_of_objectives {
+                return Err(ConfigError::new("objective_constraint_operands length does not match number_of_objectives"));
+            }
+        }
+
+        // Bounds and operands are only meaningful together — reject half a configuration at
+        // construction rather than at the first evaluation.
+        match (&objective_constraint, &objective_constraint_operands) {
+            (Some(_), None) => {
+                return Err(ConfigError::new(
+                    "objective_constraint is set but objective_constraint_operands is None — supply both or neither",
+                ))
+            }
+            (None, Some(_)) => {
+                return Err(ConfigError::new(
+                    "objective_constraint_operands is set but objective_constraint is None — supply both or neither",
+                ))
+            }
+            _ => {}
+        }
+
+        if let Some(ref operands) = objective_constraint_operands {
+            for op in operands.iter().flatten() {
+                if !matches!(op.as_str(), "<" | ">" | "<=" | ">=" | "==" | "!=") {
+                    return Err(ConfigError::new(format!(
+                        "Invalid operand: {op} (expected one of <, >, <=, >=, ==, !=)"
+                    )));
+                }
+            }
+        }
+
+        let direction: Option<Vec<i8>> = direction.or_else(|| Some(vec![-1; number_of_objectives]));
+
+        if let Some(ref dirs) = direction {
+            if dirs.len() != number_of_objectives {
+                return Err(ConfigError::new("direction length does not match number_of_objectives"));
+            }
+            if let Some(bad) = dirs.iter().find(|d| **d != 1 && **d != -1) {
+                return Err(ConfigError::new(format!(
+                    "direction entries must be 1 (maximize) or -1 (minimize), got {bad}"
+                )));
+            }
+        }
+
+        Ok(Problem {
+            solution_length,
+            number_of_objectives,
+            objective_constraint,
+            objective_constraint_operands,
+            direction,
+            solution_data_types,
+            variable_constraints: None,
+            eval_fn: EvalFn::Single(objective_function),
+            encoding: Encoding::PerGene,
+        })
+    }
+
+    /// Panicking constructor. Use [`Problem::try_new`] to handle invalid configuration as an error.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         solution_length: usize,
         number_of_objectives: usize,
@@ -40,45 +167,35 @@ impl Problem {
         solution_data_types: Vec<SolutionDataTypes>,// Vec of Binary or Integer or Real
         objective_function: fn(&Vec<f64>) -> Vec<f64>
     ) -> Self {
-        // If solution_length != solution_data_types.len() panic
-        if solution_length != solution_data_types.len() {
-            panic!("solution_length does not match solution_data_types length");
-        }
-
-        // Check if lengths match number_of_objectives
-        if let Some(ref constraints) = objective_constraint {
-            if constraints.len() != number_of_objectives {
-                panic!("objective_constraint length does not match number_of_objectives");
-            }
-        }
-
-        if let Some(ref operands) = objective_constraint_operands {
-            if operands.len() != number_of_objectives {
-                panic!("objective_constraint_operands length does not match number_of_objectives");
-            }
-        }
-
-        let direction: Option<Vec<i8>> = direction.or_else(|| Some(vec![-1; number_of_objectives]));
-
-        if let Some(ref dirs) = direction {
-            if dirs.len() != number_of_objectives {
-                panic!("direction length does not match number_of_objectives");
-            }
-        }
-
-        Problem {
+        Self::try_new(
             solution_length,
             number_of_objectives,
             objective_constraint,
             objective_constraint_operands,
             direction,
             solution_data_types,
-            variable_constraints: None,
-            eval_fn: EvalFn::Single(objective_function),
-        }
+            objective_function,
+        )
+        .unwrap_or_else(|e| panic!("{}", e))
+    }
+
+    /// Switch this problem to permutation encoding: every solution is a permutation of
+    /// `0..solution_length`. Builder-style.
+    ///
+    /// The `solution_data_types` entries are ignored for generation under this encoding (the
+    /// value space is fixed by the permutation itself), and variation switches to order
+    /// crossover + swap mutation so offspring stay valid permutations.
+    pub fn with_permutation_encoding(mut self) -> Self {
+        self.encoding = Encoding::Permutation;
+        self
     }
 
     pub fn generate_solution(&self, rng: &mut SmallRng) -> Vec<f64> {
+        if self.encoding == Encoding::Permutation {
+            let mut perm: Vec<f64> = (0..self.solution_length).map(|i| i as f64).collect();
+            perm.shuffle(rng);
+            return perm;
+        }
         let mut solution: Vec<f64> = Vec::new();
         for solution_type in &self.solution_data_types {
             match solution_type {
@@ -120,6 +237,13 @@ pub struct Solution {
     pub constraint_values: ObjVec,
     pub evaluated: bool, // default false
     pub constraint_violation: usize, // default 0
+    /// Total magnitude of constraint violation — how *far* outside the feasible region this
+    /// solution sits, summed over every violated constraint (0.0 when feasible).
+    ///
+    /// `constraint_violation` counts how many constraints are broken; this measures by how
+    /// much. Deb's constrained-domination breaks a tie between two infeasible solutions on
+    /// total violation, which a bare count cannot do.
+    pub constraint_violation_magnitude: f64, // default 0.0
     pub feasible: bool
 }
 
@@ -144,6 +268,7 @@ impl Solution {
             constraint_values,
             evaluated,
             constraint_violation,
+            constraint_violation_magnitude: 0.0,
             feasible,
         }
     }
@@ -152,6 +277,8 @@ impl Solution {
         let mut constraint_values: Vec<f64> = Vec::new();
         // Bounds and operands are only meaningful together. Half a configuration used to be
         // skipped silently, dropping every constraint without a word — refuse it instead.
+        // `Problem::try_new` rejects this up front; a hand-built struct literal can still
+        // reach here, so the guard stays.
         match (&self.problem.objective_constraint, &self.problem.objective_constraint_operands) {
             (Some(_), None) => panic!(
                 "objective_constraint is set but objective_constraint_operands is None — \
@@ -208,7 +335,45 @@ impl Solution {
         constraint_violation
     }
 
-    pub fn is_feasible(&mut self) -> bool {
+    /// Total magnitude of constraint violation: how far outside the feasible region this
+    /// solution sits, summed over every violated constraint. 0.0 when feasible.
+    ///
+    /// Objective bounds contribute their overshoot (`obj - bound` for `<`/`<=`, `bound - obj`
+    /// for `>`/`>=`, `|obj - bound|` for `==`). A violated `!=` has no natural distance — the
+    /// objective *equals* a value it must not — so it contributes a flat 1.0.
+    /// Decision-variable constraints contribute `max(0, g(x))`.
+    pub fn calculate_constraint_violation_magnitude(&self) -> f64 {
+        let mut total = 0.0;
+
+        if let (Some(constraints), Some(operands)) =
+            (&self.problem.objective_constraint, &self.problem.objective_constraint_operands)
+        {
+            for i in 0..constraints.len() {
+                let (Some(bound), Some(op)) = (constraints[i], operands[i].as_deref()) else {
+                    continue;
+                };
+                let obj = self.objective_fitness_values[i];
+                total += match op {
+                    "<" | "<=" => (obj - bound).max(0.0),
+                    ">" | ">=" => (bound - obj).max(0.0),
+                    "==" => (obj - bound).abs(),
+                    // Equality when inequality was required: no distance exists, count it once.
+                    "!=" => if obj == bound { 1.0 } else { 0.0 },
+                    other => panic!("Invalid operand: {}", other),
+                };
+            }
+        }
+
+        if let Some(gs) = &self.problem.variable_constraints {
+            for g in gs {
+                total += g(&self.solution).max(0.0);
+            }
+        }
+
+        total
+    }
+
+    pub fn is_feasible(&self) -> bool {
         self.constraint_violation == 0
     }
 
@@ -217,12 +382,14 @@ impl Solution {
             EvalFn::Single(f) => f(&self.solution).into(),
             EvalFn::Batch(_) => panic!(
                 "Solution::evaluate() called on a batch-mode Problem. \
-                 Use evaluate_population() instead."
+                 Use the GA's population evaluation instead \
+                 (NSGAII::evaluate_population / NSGAIII::run)."
             ),
         };
         self.evaluated = true;
         self.constraint_values = self.evaluate_constraints().into();
         self.constraint_violation = self.calculate_constraint_violation();
+        self.constraint_violation_magnitude = self.calculate_constraint_violation_magnitude();
         self.feasible = self.is_feasible();
     }
 
@@ -251,7 +418,7 @@ mod tests {
         let mut rng = SmallRng::seed_from_u64(0);
         let integer = Integer::new(Some(10), Some(20));
         let value = integer.generate_value(&mut rng).unwrap();
-        assert!(value >= 10 && value < 20);
+        assert!((10..=20).contains(&value)); // bounds are closed on both ends
     }
 
     #[test]
@@ -259,7 +426,7 @@ mod tests {
         let mut rng = SmallRng::seed_from_u64(0);
         let real = Real::new(Some(10.0), Some(20.0));
         let value = real.generate_value(&mut rng).unwrap();
-        assert!(value >= 10.0 && value < 20.0);
+        assert!((10.0..=20.0).contains(&value)); // bounds are closed on both ends
     }
 
     #[test]

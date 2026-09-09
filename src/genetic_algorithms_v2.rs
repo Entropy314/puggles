@@ -28,6 +28,107 @@ impl Default for ExecutionMode {
     }
 }
 
+/// Indices of solutions that still need evaluating.
+fn unevaluated_indices(population: &[Solution]) -> Vec<usize> {
+    population
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| !s.evaluated)
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Write batch results back onto the solutions they came from, refreshing constraint state.
+/// Shared by the batch-objective and GPU paths, which otherwise differ only in who computes
+/// `outputs`.
+fn apply_batch_outputs(population: &mut [Solution], idx: &[usize], outputs: Vec<Vec<f64>>) {
+    assert_eq!(
+        outputs.len(),
+        idx.len(),
+        "batch objective returned {} rows for {} solutions — it must return one row per input, in order",
+        outputs.len(),
+        idx.len()
+    );
+    for (local, &global) in idx.iter().enumerate() {
+        population[global].objective_fitness_values = outputs[local].clone().into();
+        population[global].evaluated = true;
+        let cv = population[global].evaluate_constraints();
+        population[global].constraint_values = cv.into();
+        population[global].constraint_violation = population[global].calculate_constraint_violation();
+        population[global].constraint_violation_magnitude =
+            population[global].calculate_constraint_violation_magnitude();
+        population[global].feasible = population[global].is_feasible();
+    }
+}
+
+/// Population evaluation shared by NSGA-II and NSGA-III.
+///
+/// Routes to the batch objective, the GPU, or per-solution evaluation (sequential or Rayon),
+/// and returns how many new evaluations were spent. `gpu_batch` is passed as a closure so this
+/// stays free of `#[cfg(feature = "gpu")]` in its signature; `None` means no evaluator is
+/// attached, which downgrades `GPU` to multi-threaded with a one-time warning.
+pub(crate) fn evaluate_population_shared(
+    population: &mut Vec<Solution>,
+    problem: &Problem,
+    execution_mode: ExecutionMode,
+    gpu_batch: Option<&dyn Fn(&Vec<Vec<f64>>) -> Vec<Vec<f64>>>,
+) -> usize {
+    // Batch path: call the batch objective once with all unevaluated solutions.
+    if let EvalFn::Batch(batch_fn) = problem.eval_fn {
+        let idx = unevaluated_indices(population);
+        if idx.is_empty() {
+            return 0;
+        }
+        let inputs: Vec<Vec<f64>> = idx.iter().map(|&i| population[i].solution.clone()).collect();
+        let outputs = batch_fn(&inputs);
+        apply_batch_outputs(population, &idx, outputs);
+        return idx.len();
+    }
+
+    // GPU path: batch-evaluate via wgpu compute shader.
+    if execution_mode == ExecutionMode::GPU {
+        if let Some(gpu) = gpu_batch {
+            let idx = unevaluated_indices(population);
+            if idx.is_empty() {
+                return 0;
+            }
+            let inputs: Vec<Vec<f64>> = idx.iter().map(|&i| population[i].solution.clone()).collect();
+            let outputs = gpu(&inputs);
+            apply_batch_outputs(population, &idx, outputs);
+            return idx.len();
+        }
+        // Warn once per process, not once per generation.
+        static GPU_FALLBACK_WARNING: std::sync::Once = std::sync::Once::new();
+        GPU_FALLBACK_WARNING.call_once(|| {
+            eprintln!(
+                "puggles warning: ExecutionMode::GPU selected but no GpuEvaluator attached. \
+                 Falling back to MultiThreaded. Build with --features gpu and attach one via \
+                 with_gpu_evaluator() to enable GPU."
+            );
+        });
+    }
+
+    // Single-evaluation path (Sequential or Rayon-parallel).
+    match execution_mode {
+        ExecutionMode::Sequential => population
+            .iter_mut()
+            .filter(|s| !s.evaluated)
+            .map(|s| {
+                s.evaluate();
+                1
+            })
+            .sum(),
+        ExecutionMode::MultiThreaded | ExecutionMode::GPU => population
+            .par_iter_mut()
+            .filter(|s| !s.evaluated)
+            .map(|s| {
+                s.evaluate();
+                1
+            })
+            .sum(),
+    }
+}
+
 pub struct NSGAII {
     pub problem: Arc<Problem>,
     pub population_size: usize,
@@ -333,14 +434,88 @@ impl NSGAII {
         }
     }
 
+    /// Objective vectors of the current archive (or population, if the archive is empty),
+    /// mapped into minimization space so the `metrics` functions apply directly.
+    fn front_in_minimization_space(&self) -> Vec<Vec<f64>> {
+        let n_obj = self.problem.number_of_objectives;
+        let dirs = self.problem.direction.clone().unwrap_or_else(|| vec![-1; n_obj]);
+        let src = if self.archive.is_empty() { &self.population } else { &self.archive };
+        src.iter()
+            .map(|s| {
+                (0..n_obj)
+                    .map(|i| {
+                        let v = s.objective_fitness_values[i];
+                        if dirs[i] == 1 { -v } else { v }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Hypervolume of the current archive against `reference`, in minimization space.
+    /// Two objectives only — see [`crate::metrics::hypervolume_2d`].
+    pub fn archive_hypervolume(&self, reference: [f64; 2]) -> f64 {
+        crate::metrics::hypervolume_2d(&self.front_in_minimization_space(), reference)
+    }
+
+    /// Run until the NFE budget is spent OR the archive's **hypervolume** plateaus.
+    ///
+    /// Diversity-aware alternative to [`run_until_converged`](NSGAII::run_until_converged):
+    /// hypervolume responds both to the front pushing outward and to it filling in, so a run
+    /// that has stopped extending but is still spreading is not called converged. Stops once
+    /// hypervolume fails to improve by more than `epsilon` for `patience` consecutive
+    /// generations. Returns the number of generations run.
+    ///
+    /// `reference` is the nadir point and must be worse (larger, in minimization space) than
+    /// every point you expect on the front; points beyond it contribute nothing.
+    ///
+    /// # Panics
+    /// If the problem does not have exactly 2 objectives.
+    pub fn run_until_hv_converged(
+        &mut self,
+        max_nfe: usize,
+        patience: usize,
+        epsilon: f64,
+        reference: [f64; 2],
+    ) -> usize {
+        assert_eq!(
+            self.problem.number_of_objectives, 2,
+            "run_until_hv_converged needs exactly 2 objectives (exact hypervolume is 2-D only); \
+             use run_until_converged for other objective counts"
+        );
+        self.prime();
+
+        let mut best_hv = f64::NEG_INFINITY;
+        let mut stale = 0usize;
+        let mut gens = 0usize;
+
+        while self.nfe.load(Ordering::Relaxed) < max_nfe {
+            let remaining = max_nfe - self.nfe.load(Ordering::Relaxed);
+            self.iterate_n(remaining.min(self.population_size));
+            self.update_archive();
+            gens += 1;
+
+            let hv = self.archive_hypervolume(reference);
+            if hv > best_hv + epsilon {
+                best_hv = hv;
+                stale = 0;
+            } else {
+                stale += 1;
+                if stale >= patience {
+                    break;
+                }
+            }
+        }
+        gens
+    }
+
     /// Run until the NFE budget is spent OR the archive stops improving.
     /// Convergence signal: the best value of each objective (respecting `direction`)
     /// hasn't improved by more than `epsilon` for `patience` consecutive generations.
     /// Returns the number of generations run.
     ///
-    /// ponytail: per-objective-best plateau — cheap and reference-free, but it tracks
-    /// front *extent*, not spread. Swap in a hypervolume plateau (see `metrics`) if you
-    /// need diversity-aware stopping.
+    /// This tracks front *extent*, not spread. For a diversity-aware stop on 2-objective
+    /// problems, use [`run_until_hv_converged`](NSGAII::run_until_hv_converged).
     pub fn run_until_converged(&mut self, max_nfe: usize, patience: usize, epsilon: f64) -> usize {
         self.prime();
 
@@ -398,6 +573,7 @@ impl NSGAII {
                 constraint_values: Default::default(),
                 evaluated: false,
                 constraint_violation: 0,
+                constraint_violation_magnitude: 0.0,
                 feasible: false,
             });
         }
@@ -405,82 +581,22 @@ impl NSGAII {
     }
 
     pub fn evaluate_population(&mut self, population: &mut Vec<Solution>) {
-        // Batch path: call the batch objective function once with all unevaluated solutions.
-        if let EvalFn::Batch(batch_fn) = self.problem.eval_fn {
-            let unevaluated: Vec<usize> = population.iter().enumerate()
-                .filter(|(_, s)| !s.evaluated)
-                .map(|(i, _)| i)
-                .collect();
-            if !unevaluated.is_empty() {
-                let inputs: Vec<Vec<f64>> = unevaluated.iter()
-                    .map(|&i| population[i].solution.clone())
-                    .collect();
-                let outputs = batch_fn(&inputs);
-                for (local_i, &global_i) in unevaluated.iter().enumerate() {
-                    population[global_i].objective_fitness_values = outputs[local_i].clone().into();
-                    population[global_i].evaluated = true;
-                    let cv = population[global_i].evaluate_constraints();
-                    population[global_i].constraint_values = cv.into();
-                    let viol = population[global_i].calculate_constraint_violation();
-                    population[global_i].constraint_violation = viol;
-                    let feas = population[global_i].is_feasible();
-                    population[global_i].feasible = feas;
-                }
-                self.nfe.fetch_add(unevaluated.len(), Ordering::Relaxed);
-            }
-            return;
-        }
-
-        // GPU path: batch-evaluate via wgpu compute shader.
         #[cfg(feature = "gpu")]
-        if self.execution_mode == ExecutionMode::GPU {
-            if let Some(ref gpu) = self.gpu_evaluator {
-                let unevaluated: Vec<usize> = population.iter().enumerate()
-                    .filter(|(_, s)| !s.evaluated)
-                    .map(|(i, _)| i)
-                    .collect();
-                if !unevaluated.is_empty() {
-                    let inputs: Vec<Vec<f64>> = unevaluated.iter()
-                        .map(|&i| population[i].solution.clone())
-                        .collect();
-                    let outputs = gpu.evaluate_batch(&inputs);
-                    for (local_i, &global_i) in unevaluated.iter().enumerate() {
-                        population[global_i].objective_fitness_values = outputs[local_i].clone().into();
-                        population[global_i].evaluated = true;
-                        let cv = population[global_i].evaluate_constraints();
-                        population[global_i].constraint_values = cv.into();
-                        let viol = population[global_i].calculate_constraint_violation();
-                        population[global_i].constraint_violation = viol;
-                        let feas = population[global_i].is_feasible();
-                        population[global_i].feasible = feas;
-                    }
-                    self.nfe.fetch_add(unevaluated.len(), Ordering::Relaxed);
-                }
-                return;
-            } else {
-                eprintln!(
-                    "puggles warning: ExecutionMode::GPU selected but no GpuEvaluator attached. \
-                     Falling back to MultiThreaded. Use NSGAII::with_gpu_evaluator() to enable GPU."
+        {
+            if let Some(gpu) = self.gpu_evaluator.as_ref() {
+                let run_gpu = |inputs: &Vec<Vec<f64>>| gpu.evaluate_batch(inputs);
+                let n = evaluate_population_shared(
+                    population,
+                    &self.problem,
+                    self.execution_mode,
+                    Some(&run_gpu),
                 );
+                self.nfe.fetch_add(n, Ordering::Relaxed);
+                return;
             }
         }
-
-        // Single-evaluation path (Sequential or Rayon-parallel).
-        let new_evals: usize = match self.execution_mode {
-            ExecutionMode::Sequential => {
-                population.iter_mut()
-                    .filter(|s| !s.evaluated)
-                    .map(|s| { s.evaluate(); 1 })
-                    .sum()
-            }
-            ExecutionMode::MultiThreaded | ExecutionMode::GPU => {
-                population.par_iter_mut()
-                    .filter(|s| !s.evaluated)
-                    .map(|s| { s.evaluate(); 1 })
-                    .sum()
-            }
-        };
-        self.nfe.fetch_add(new_evals, Ordering::Relaxed);
+        let n = evaluate_population_shared(population, &self.problem, self.execution_mode, None);
+        self.nfe.fetch_add(n, Ordering::Relaxed);
     }
 
     pub fn iterate(&mut self) {
@@ -532,6 +648,7 @@ mod tests {
             direction: Some(vec![-1]),
             solution_data_types: vec![SolutionDataTypes::Real(Real::new(Some(-1.0), Some(1.0)))],
             variable_constraints: None,
+            encoding: crate::core::Encoding::PerGene,
             eval_fn: EvalFn::Single(record_evaluation_thread),
         }
     }
@@ -565,6 +682,7 @@ mod tests {
                 SolutionDataTypes::Real(Real::new(Some(-10.0), Some(10.0))),
             ],
             variable_constraints: None,
+            encoding: crate::core::Encoding::PerGene,
             eval_fn: EvalFn::Single(parabloid_5_loc),
         }
     }
@@ -582,6 +700,7 @@ mod tests {
                 SolutionDataTypes::BitBinary(BitBinary::new()),
             ],
             variable_constraints: None,
+            encoding: crate::core::Encoding::PerGene,
             eval_fn: EvalFn::Single(|x| vec![
                 x[0] * x[0] + x[1] as f64,
                 (x[0] - 2.0).powi(2) + x[2],
@@ -604,6 +723,7 @@ mod tests {
                 SolutionDataTypes::Real(Real::new(Some(10.0), Some(1000.0))),
             ],
             variable_constraints: None,
+            encoding: crate::core::Encoding::PerGene,
             eval_fn: EvalFn::Single(|x| vec![x.iter().sum()]),
         }
     }
@@ -736,6 +856,7 @@ mod tests {
                 SolutionDataTypes::Real(Real::new(Some(-1.0), Some(1.0))),
             ],
             variable_constraints: None,
+            encoding: crate::core::Encoding::PerGene,
             eval_fn: EvalFn::Batch(|batch| batch.iter().map(|x| vec![x.iter().sum::<f64>()]).collect()),
         });
         let ga = NSGAII::new(batch_problem, 10, ExecutionMode::MultiThreaded);

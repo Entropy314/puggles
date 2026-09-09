@@ -166,6 +166,7 @@ fn main() {
         direction: Some(vec![-1, -1]),
         solution_data_types: real_types(0.0, 1.0),
         variable_constraints: None,
+        encoding: puggles::core::Encoding::PerGene,
         eval_fn: EvalFn::Single(zdt1),
     });
 
@@ -195,6 +196,7 @@ fn main() {
         direction: Some(vec![-1, -1]),
         solution_data_types: real_types(-1.0, 1.0),
         variable_constraints: None,
+        encoding: puggles::core::Encoding::PerGene,
         eval_fn: EvalFn::Single(expensive_obj),
     });
 

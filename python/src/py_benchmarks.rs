@@ -113,6 +113,23 @@ pub fn create_benchmark_problem(
         }
     };
 
+    // Probe the benchmark once: several of these derive their objective count from the
+    // solution length, so a mismatch with `number_of_objectives` is easy to request by
+    // accident. Caught here it is a ValueError; left alone it used to surface as an
+    // index-out-of-bounds panic from inside the dominance comparison, mid-run.
+    let probe: Vec<f64> = bounds.iter().map(|&(lo, hi)| 0.5 * (lo + hi)).collect();
+    let produced = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| obj_fn(&probe).len()))
+        .map_err(|_| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "benchmark '{name}' could not be evaluated at solution_length={solution_length}.                  Several benchmarks require a minimum number of variables (DTLZ needs at least 6)."
+            ))
+        })?;
+    if produced != number_of_objectives {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "benchmark '{name}' returns {produced} objective(s) at solution_length={solution_length},              but number_of_objectives={number_of_objectives} was requested. Pass              number_of_objectives={produced}, or choose a benchmark whose objective count matches."
+        )));
+    }
+
     let data_types: Vec<SolutionDataTypes> = bounds
         .iter()
         .map(|&(lo, hi)| SolutionDataTypes::Real(Real::new(Some(lo), Some(hi))))

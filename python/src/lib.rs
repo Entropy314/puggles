@@ -1,6 +1,8 @@
 use pyo3::prelude::*;
 
 mod py_benchmarks;
+mod py_islands;
+mod py_metrics;
 #[cfg(feature = "gpu")]
 mod py_gpu;
 mod py_nsga3;
@@ -44,6 +46,14 @@ fn puggles(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_benchmarks::dtlz6, m)?)?;
     m.add_function(wrap_pyfunction!(py_benchmarks::dtlz7, m)?)?;
     m.add_function(wrap_pyfunction!(py_benchmarks::create_benchmark_problem, m)?)?;
+
+    // Front-quality metrics (minimization space)
+    m.add_function(wrap_pyfunction!(py_metrics::hypervolume_2d, m)?)?;
+    m.add_function(wrap_pyfunction!(py_metrics::igd, m)?)?;
+    m.add_function(wrap_pyfunction!(py_metrics::spacing, m)?)?;
+
+    // Island-model parallelism
+    m.add_function(wrap_pyfunction!(py_islands::run_island_model, m)?)?;
 
     Ok(())
 }

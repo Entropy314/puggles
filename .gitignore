@@ -10,6 +10,9 @@ target/
 *.ipynb
 .ipynb_checkpoints/
 .claude/*
+graphify*
+.graphify_root
+sandbox/
 
 # Python bindings build/packaging artifacts (python/ crate)
 __pycache__/

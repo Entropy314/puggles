@@ -78,6 +78,7 @@ fn bench_puggles() -> Row {
         direction: Some(vec![-1]),
         solution_data_types: types,
         variable_constraints: None,
+        encoding: puggles::core::Encoding::PerGene,
         eval_fn: EvalFn::Single(obj),
     });
 

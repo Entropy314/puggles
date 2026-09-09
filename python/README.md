@@ -56,11 +56,38 @@ against pymoo's 0.076.
 - **Real, Integer, and Binary** decision variables, mixable in one problem
 - **Constraints** — objective bounds and decision-variable `g(x) <= 0`
 - **Batch objectives** — `batch_objective_function=f` evaluates a whole population per call,
-  amortizing the GIL. ~1.8× on an expensive objective; a wash on a cheap one.
+  amortizing the GIL. ~1.8× on an expensive objective; a wash on a cheap one. Works with both
+  `NSGAII` and `NSGAIII`.
+- **Permutation encoding** — `permutation=True` for ordering problems (TSP, scheduling); uses
+  order crossover and swap mutation so solutions stay valid permutations.
+- **Checkpoint & resume** — `ga.save_state()` returns JSON, `ga.load_state(s)` restores it, so
+  long runs survive a restart.
+- **Front-quality metrics** — `hypervolume_2d`, `igd`, `spacing`, and
+  `run_until_hv_converged(...)` to stop when the front stops improving instead of at a fixed
+  budget.
+- **Island model** — `run_island_model(...)` runs independent populations in parallel and merges
+  their fronts (native Rust objectives only; the GIL would serialize Python callables).
 - **Reproducible runs** — `seed=42` fixes the initial population, crossover, mutation, and
   selection, so a run repeats exactly. Omit it for fresh randomness each time.
 - **GPU evaluation** via `GpuProblem` and a WGSL compute shader (experimental)
+- **Clear errors** — invalid bounds or configuration raise `ValueError`, not a Rust panic.
 - Built-in DTLZ1–7 benchmark problems
+
+### Permutation example
+
+```python
+import puggles as pg
+
+POS = [0.0, 9.0, 3.0, 7.0, 1.0, 5.0, 8.0, 2.0]
+tour = lambda x: [sum(abs(POS[int(a)] - POS[int(b)]) for a, b in zip(x, x[1:]))]
+
+problem = pg.Problem(8, 1, [pg.Integer(0, 7)] * 8, tour, permutation=True)
+ga = pg.NSGAII(problem, population_size=40, seed=5)
+ga.run(6000)
+
+best = min(ga.get_archive(), key=lambda s: s.objectives[0])
+print(best.objectives[0], [int(v) for v in best.variables])
+```
 
 ## Reproducibility
 

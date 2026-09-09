@@ -74,6 +74,10 @@ pub struct PyNSGAII {
     last_archive: Vec<PySolution>,
     last_population: Vec<PySolution>,
     last_nfe: usize,
+    /// Snapshot of the most recent run, for `save_state()`.
+    last_state: Option<puggles::checkpoint::GaState>,
+    /// Checkpoint to restore before the next `run()`, set by `load_state()`.
+    pending_state: Option<puggles::checkpoint::GaState>,
 }
 
 #[pymethods]
@@ -129,6 +133,8 @@ impl PyNSGAII {
             last_archive: Vec::new(),
             last_population: Vec::new(),
             last_nfe: 0,
+            last_state: None,
+            pending_state: None,
         }
     }
 
@@ -188,6 +194,9 @@ impl PyNSGAII {
             if let Some(mm) = mutation_manager {
                 ga.mutation_manager = mm;
             }
+            if let Some(state) = self.pending_state.take() {
+                ga.load_state(state);
+            }
 
             if let Some(ref cb) = callback {
                 // Step-by-step loop with per-iteration callback.
@@ -221,6 +230,7 @@ impl PyNSGAII {
             self.last_population =
                 ga.population.iter().map(PySolution::from_core_solution).collect();
             self.last_nfe = ga.get_nfe();
+            self.last_state = Some(ga.save_state());
         } else {
             // Pure-Rust or GPU objective, no Python callback: release the GIL for true
             // Rayon parallelism. `Arc<Problem>` is Send + Sync, so it moves in directly.
@@ -228,8 +238,9 @@ impl PyNSGAII {
             let pop_size = self.population_size;
             let mode = effective_mode;
             let seed = self.seed;
+            let pending = self.pending_state.take();
 
-            let (archive, population, nfe) = py.allow_threads(move || {
+            let (archive, population, nfe, state) = py.allow_threads(move || {
                 let mut ga = NSGAII::new(problem, pop_size, mode);
                 if let Some(s) = seed {
                     ga = ga.with_seed(s);
@@ -240,17 +251,22 @@ impl PyNSGAII {
                 if let Some(mm) = mutation_manager {
                     ga.mutation_manager = mm;
                 }
+                if let Some(state) = pending {
+                    ga.load_state(state);
+                }
                 ga.run(max_nfe);
                 let archive = ga.get_archive().to_vec();
                 let population = ga.population.clone();
                 let nfe = ga.get_nfe();
-                (archive, population, nfe)
+                let state = ga.save_state();
+                (archive, population, nfe, state)
             });
 
             self.last_archive = archive.iter().map(PySolution::from_core_solution).collect();
             self.last_population =
                 population.iter().map(PySolution::from_core_solution).collect();
             self.last_nfe = nfe;
+            self.last_state = Some(state);
         }
 
         Ok(())
@@ -270,6 +286,108 @@ impl PyNSGAII {
     #[getter]
     fn nfe(&self) -> usize {
         self.last_nfe
+    }
+
+    /// Hypervolume of the last run's archive against `reference`, a 2-tuple nadir point.
+    ///
+    /// Computed in minimization space: maximized objectives are negated first, so the value is
+    /// comparable across runs regardless of `direction`. Two objectives only.
+    fn archive_hypervolume(&self, py: Python<'_>, reference: (f64, f64)) -> PyResult<f64> {
+        let store = extract_store(py, &self.problem)?;
+        if store.problem.number_of_objectives != 2 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "archive_hypervolume needs exactly 2 objectives (exact hypervolume is 2-D only)",
+            ));
+        }
+        let dirs = store.problem.direction.clone().unwrap_or_else(|| vec![-1; 2]);
+        let front: Vec<Vec<f64>> = self
+            .last_archive
+            .iter()
+            .map(|s| {
+                (0..2)
+                    .map(|i| if dirs[i] == 1 { -s.objectives[i] } else { s.objectives[i] })
+                    .collect()
+            })
+            .collect();
+        Ok(puggles::metrics::hypervolume_2d(&front, [reference.0, reference.1]))
+    }
+
+    /// Serialize the last run's population, archive, and evaluation count to a JSON string.
+    ///
+    /// The objective function is *not* stored (it is a Python callable), so resume by building
+    /// the same Problem, then calling `load_state()` before `run()`.
+    ///
+    /// Raises RuntimeError if called before the first `run()`.
+    fn save_state(&self) -> PyResult<String> {
+        let state = self.last_state.as_ref().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("no state to save — call run() first")
+        })?;
+        serde_json::to_string(state)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
+    }
+
+    /// Restore a checkpoint produced by `save_state()`. The next `run(max_nfe)` resumes from
+    /// the restored evaluation count, so pass the *cumulative* budget.
+    fn load_state(&mut self, state: &str) -> PyResult<()> {
+        let parsed: puggles::checkpoint::GaState = serde_json::from_str(state)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("invalid checkpoint: {e}")))?;
+        self.pending_state = Some(parsed);
+        Ok(())
+    }
+
+    /// Run until the evaluation budget is spent or the archive's hypervolume plateaus.
+    ///
+    /// Diversity-aware stopping for 2-objective problems: unlike a per-objective-best plateau,
+    /// hypervolume also responds to the front filling in. Returns the generation count.
+    ///
+    /// Args:
+    ///     max_nfe: Evaluation budget.
+    ///     reference: Nadir point (2 floats), worse than every expected front point.
+    ///     patience: Generations without improvement before stopping.
+    ///     epsilon: Minimum hypervolume gain that counts as improvement.
+    #[pyo3(signature = (max_nfe, reference, patience = 20, epsilon = 1e-6))]
+    fn run_until_hv_converged(
+        &mut self,
+        py: Python<'_>,
+        max_nfe: usize,
+        reference: (f64, f64),
+        patience: usize,
+        epsilon: f64,
+    ) -> PyResult<usize> {
+        let store = extract_store(py, &self.problem)?;
+        if store.uses_batch_callable {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "run_until_hv_converged does not support a batch objective yet; use run()",
+            ));
+        }
+        if store.problem.number_of_objectives != 2 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "run_until_hv_converged needs exactly 2 objectives (exact hypervolume is 2-D only)",
+            ));
+        }
+        if store.uses_python_callable {
+            set_active_problem_id(store.problem_id);
+        }
+        let mode = if store.uses_python_callable {
+            ExecutionMode::Sequential
+        } else {
+            self.execution_mode
+        };
+
+        let mut ga = NSGAII::new(Arc::clone(&store.problem), self.population_size, mode);
+        if let Some(s) = self.seed {
+            ga = ga.with_seed(s);
+        }
+        if let Some(state) = self.pending_state.take() {
+            ga.load_state(state);
+        }
+        let gens = ga.run_until_hv_converged(max_nfe, patience, epsilon, [reference.0, reference.1]);
+
+        self.last_archive = ga.get_archive().iter().map(PySolution::from_core_solution).collect();
+        self.last_population = ga.population.iter().map(PySolution::from_core_solution).collect();
+        self.last_nfe = ga.get_nfe();
+        self.last_state = Some(ga.save_state());
+        Ok(gens)
     }
 
     fn __repr__(&self) -> String {

@@ -35,6 +35,10 @@ smallvec = "1"
 wgpu = { version = "22", optional = true }
 pollster = { version = "0.3", optional = true }
 
+[dev-dependencies]
+# Only for the checkpoint round-trip tests; GaState is format-agnostic.
+serde_json = "1"
+
 [profile.release]
 lto = true
 codegen-units = 1
