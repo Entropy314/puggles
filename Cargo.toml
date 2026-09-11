@@ -3,7 +3,7 @@ members = ["."]
 
 [package]
 name = "puggles"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.74"
 description = "Multi-objective evolutionary optimization: NSGA-II and NSGA-III over continuous, integer, and binary variables, with constraint handling, Rayon parallelism, and optional GPU evaluation."

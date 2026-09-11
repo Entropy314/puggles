@@ -4,7 +4,7 @@
 
 [package]
 name = "puggles-python"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [lib]
@@ -15,7 +15,7 @@ crate-type = ["cdylib"]
 gpu = ["puggles/gpu"]
 
 [dependencies]
-puggles = { path = "..", version = "0.1.0" }
+puggles = { path = "..", version = "0.2.0" }
 pyo3 = { version = "0.25", features = ["extension-module", "abi3-py39"] }
 rayon = "1.10.0"
 # Checkpoints cross the FFI boundary as a JSON string.
