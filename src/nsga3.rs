@@ -12,13 +12,12 @@
 
 use crate::core::{Problem, Solution};
 use crate::dominance::{crowding_distance, fast_non_dominated_sort, ParetoDominance};
-use crate::genetic_algorithms_v2::ExecutionMode;
+use crate::genetic_algorithms_v2::{evaluate_population_shared, ExecutionMode};
 use crate::genetic_operators::crossover::CrossoverManager;
 use crate::genetic_operators::mutation::MutationManager;
 use crate::genetic_operators::selectors::CrowdingTournamentSelector;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
-use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -60,6 +59,11 @@ pub struct NSGAIII {
     reference_points: Vec<Vec<f64>>,
     ranks: Vec<usize>,
     crowding: Vec<f64>,
+    /// Optional GPU evaluator. When set and execution_mode == GPU, population evaluation is
+    /// offloaded to the GPU, matching NSGA-II. Without one, GPU downgrades to multi-threaded
+    /// with a warning instead of silently running on the CPU.
+    #[cfg(feature = "gpu")]
+    pub gpu_evaluator: Option<crate::gpu_evaluator::GpuEvaluator>,
 }
 
 impl NSGAIII {
@@ -96,7 +100,17 @@ impl NSGAIII {
             reference_points,
             ranks: Vec::new(),
             crowding: Vec::new(),
+            #[cfg(feature = "gpu")]
+            gpu_evaluator: None,
         }
+    }
+
+    /// Attach a GPU evaluator for use when `execution_mode == GPU`.
+    /// Builder method — call before `run()`.
+    #[cfg(feature = "gpu")]
+    pub fn with_gpu_evaluator(mut self, evaluator: crate::gpu_evaluator::GpuEvaluator) -> Self {
+        self.gpu_evaluator = Some(evaluator);
+        self
     }
 
     /// Seed all randomness for a reproducible run. Builder-style; call before `run`.
@@ -128,17 +142,31 @@ impl NSGAIII {
                 constraint_values: Default::default(),
                 evaluated: false,
                 constraint_violation: 0,
+                constraint_violation_magnitude: 0.0,
                 feasible: false,
             });
         }
         self.population = pop;
     }
 
+    /// Evaluate via the shared routine, so NSGA-III gets the same batch-objective and GPU
+    /// support as NSGA-II rather than silently running everything on the CPU.
     fn evaluate(&self, population: &mut Vec<Solution>) -> usize {
-        let n: usize = match self.execution_mode {
-            ExecutionMode::Sequential => population.iter_mut().filter(|s| !s.evaluated).map(|s| { s.evaluate(); 1 }).sum(),
-            _ => population.par_iter_mut().filter(|s| !s.evaluated).map(|s| { s.evaluate(); 1 }).sum(),
-        };
+        #[cfg(feature = "gpu")]
+        {
+            if let Some(gpu) = self.gpu_evaluator.as_ref() {
+                let run_gpu = |inputs: &Vec<Vec<f64>>| gpu.evaluate_batch(inputs);
+                let n = evaluate_population_shared(
+                    population,
+                    &self.problem,
+                    self.execution_mode,
+                    Some(&run_gpu),
+                );
+                self.nfe.fetch_add(n, Ordering::Relaxed);
+                return n;
+            }
+        }
+        let n = evaluate_population_shared(population, &self.problem, self.execution_mode, None);
         self.nfe.fetch_add(n, Ordering::Relaxed);
         n
     }
@@ -332,6 +360,7 @@ mod tests {
             direction: Some(vec![-1, -1, -1]),
             solution_data_types: (0..6).map(|_| SolutionDataTypes::Real(Real::new(Some(0.0), Some(1.0)))).collect(),
             variable_constraints: None,
+            encoding: crate::core::Encoding::PerGene,
             eval_fn: EvalFn::Single(|x| {
                 let g: f64 = x[2..].iter().map(|v| (v - 0.5).powi(2)).sum();
                 vec![(1.0 + g) * x[0], (1.0 + g) * (1.0 - x[0]) * x[1], (1.0 + g) * (1.0 - x[0]) * (1.0 - x[1])]

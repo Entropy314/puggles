@@ -27,7 +27,7 @@ impl PyNSGAIII {
     /// Create an NSGA-III optimizer.
     ///
     /// Args:
-    ///     problem: The Problem to optimize (a batch objective is NOT supported here — use NSGAII).
+    ///     problem: The Problem to optimize. Batch objectives are supported.
     ///     population_size: Individuals per generation. 0 derives it from the reference-point count.
     ///     divisions: Reference-point density (e.g. 12 for 3 objectives → 91 points).
     ///     execution_mode: "sequential", "multithreaded", or "gpu" (default "sequential"). A
@@ -59,12 +59,10 @@ impl PyNSGAIII {
     fn run(&mut self, py: Python<'_>, max_nfe: usize) -> PyResult<()> {
         let store = extract_store(py, &self.problem)?;
         if store.uses_batch_callable {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "NSGA-III does not support a batch objective; use NSGAII for batch_objective_function.",
-            ));
+            crate::py_problem::set_active_batch_problem_id(store.problem_id);
         }
         // A Python callable re-acquires the GIL per eval → force Sequential (see PyNSGAII).
-        let mode = if store.uses_python_callable {
+        let mode = if store.uses_python_callable || store.uses_batch_callable {
             ExecutionMode::Sequential
         } else {
             self.execution_mode
@@ -77,7 +75,7 @@ impl PyNSGAIII {
         let divisions = self.divisions;
         let seed = self.seed;
 
-        let (archive, population, nfe) = if store.uses_python_callable {
+        let (archive, population, nfe) = if store.uses_python_callable || store.uses_batch_callable {
             // Hold the GIL: the objective trampoline calls back into Python.
             let mut ga = NSGAIII::new(Arc::clone(&store.problem), pop_size, divisions, mode);
             if let Some(s) = seed {

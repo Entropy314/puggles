@@ -213,6 +213,7 @@ fn half_configured_objective_constraints_are_rejected() {
         solution_data_types: vec![SolutionDataTypes::Real(Real::new(Some(0.0), Some(1.0)))],
         eval_fn: puggles::core::EvalFn::Single(offset_sphere),
         variable_constraints: None,
+        encoding: puggles::core::Encoding::PerGene,
     });
     Solution::new(problem).evaluate();
 }

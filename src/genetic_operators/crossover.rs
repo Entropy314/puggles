@@ -1,4 +1,4 @@
-use crate::core::Solution;
+use crate::core::{Encoding, Solution};
 use crate::gatypes::SolutionDataTypes;
 use rand::Rng;
 use rand::rngs::SmallRng;
@@ -343,11 +343,89 @@ impl Crossover for ArithmeticCrossover {
 
 
 
+/// Order crossover (OX1) for [`Encoding::Permutation`] problems.
+///
+/// Copies a random contiguous segment from one parent, then fills the remaining positions with
+/// the other parent's genes in their relative order, skipping ones already taken. Both children
+/// are valid permutations, which the per-gene operators cannot guarantee — blending or swapping
+/// individual genes duplicates some cities and drops others.
+pub struct OrderCrossover {
+    /// Probability that a pair is recombined at all. Otherwise the children are parent copies.
+    pub probability: f64,
+}
+
+impl Default for OrderCrossover {
+    fn default() -> Self {
+        Self { probability: 0.9 }
+    }
+}
+
+/// One direction of OX1: `segment_donor` supplies the copied slice, `order_donor` the rest.
+fn ox1(segment_donor: &[f64], order_donor: &[f64], cut1: usize, cut2: usize) -> Vec<f64> {
+    let n = segment_donor.len();
+    let mut child = vec![f64::NAN; n];
+    // `taken` is indexed by gene value, valid because a permutation holds exactly 0..n.
+    let mut taken = vec![false; n];
+
+    for i in cut1..cut2 {
+        child[i] = segment_donor[i];
+        let v = segment_donor[i] as usize;
+        if v < n {
+            taken[v] = true;
+        }
+    }
+
+    // Walk the order donor from cut2 (wrapping), filling the holes from cut2 (wrapping).
+    let mut write = cut2 % n;
+    for k in 0..n {
+        let read = (cut2 + k) % n;
+        let gene = order_donor[read];
+        let v = gene as usize;
+        if v < n && taken[v] {
+            continue;
+        }
+        while !child[write].is_nan() {
+            write = (write + 1) % n;
+        }
+        child[write] = gene;
+        if v < n {
+            taken[v] = true;
+        }
+    }
+    child
+}
+
+impl Crossover for OrderCrossover {
+    fn crossover(&self, parent1: &Solution, parent2: &Solution, rng: &mut SmallRng) -> (Solution, Solution) {
+        let mut child1 = parent1.clone();
+        let mut child2 = parent2.clone();
+        let n = parent1.solution.len();
+
+        if n >= 2 && rng.gen::<f64>() < self.probability {
+            let a = rng.gen_range(0..n);
+            let b = rng.gen_range(0..n);
+            let (cut1, cut2) = if a <= b { (a, b) } else { (b, a) };
+            // An empty or full segment makes OX1 a straight parent copy; nudge to a real slice.
+            let (cut1, cut2) = if cut1 == cut2 { (cut1, (cut2 + 1).min(n)) } else { (cut1, cut2) };
+            child1.solution = ox1(&parent1.solution, &parent2.solution, cut1, cut2);
+            child2.solution = ox1(&parent2.solution, &parent1.solution, cut1, cut2);
+        }
+
+        child1.evaluated = false;
+        child1.feasible = false;
+        child2.evaluated = false;
+        child2.feasible = false;
+        (child1, child2)
+    }
+}
+
 /// CrossoverManager to manage and apply different crossover operations
 pub struct CrossoverManager {
     default_real_crossover: Box<dyn Crossover + Send>,
     default_integer_crossover: Box<dyn Crossover + Send>,
     default_binary_crossover: Box<dyn Crossover + Send>,
+    /// Used instead of the per-type operators when the problem uses permutation encoding.
+    permutation_crossover: Box<dyn Crossover + Send>,
 }
 
 impl CrossoverManager {
@@ -357,7 +435,13 @@ impl CrossoverManager {
             default_real_crossover: Box::new(SimulatedBinaryCrossover::new(None, None)),
             default_integer_crossover: Box::new(UniformCrossover { probability: 0.5 }),
             default_binary_crossover: Box::new(UniformCrossover { probability: 0.5 }),
+            permutation_crossover: Box::new(OrderCrossover::default()),
         }
+    }
+
+    /// Sets the crossover used for permutation-encoded problems. Must preserve permutations.
+    pub fn set_permutation_crossover(&mut self, crossover: Box<dyn Crossover + Send>) {
+        self.permutation_crossover = crossover;
     }
 
     /// Sets the default crossover for Real types
@@ -382,6 +466,13 @@ impl CrossoverManager {
         parent2: &Solution,
         rng: &mut SmallRng,
     ) -> Vec<Solution> {
+        // Permutation encoding: genes are not independent, so the per-type merge below would
+        // produce invalid permutations. One whole-vector operator owns the pair instead.
+        if parent1.problem.encoding == Encoding::Permutation {
+            let (c1, c2) = self.permutation_crossover.crossover(parent1, parent2, rng);
+            return vec![c1, c2];
+        }
+
         let types = &parent1.problem.solution_data_types;
 
         // Each operator only touches genes of its own type (others pass through unchanged),
@@ -462,6 +553,7 @@ mod tests {
                 SolutionDataTypes::Real(Real::new(Some(10.0), Some(1000.0))),
             ],
             variable_constraints: None,
+            encoding: crate::core::Encoding::PerGene,
             eval_fn: EvalFn::Single(|x| vec![x.iter().sum()]),
         }
     }
@@ -474,6 +566,7 @@ mod tests {
                 objective_fitness_values: Default::default(),
                 constraint_values: Default::default(),
                 constraint_violation: 0,
+                constraint_violation_magnitude: 0.0,
                 feasible: false,
                 evaluated: false,
             },
@@ -483,6 +576,7 @@ mod tests {
                 objective_fitness_values: Default::default(),
                 constraint_values: Default::default(),
                 constraint_violation: 0,
+                constraint_violation_magnitude: 0.0,
                 feasible: false,
                 evaluated: false,
             },
@@ -492,6 +586,7 @@ mod tests {
                 objective_fitness_values: Default::default(),
                 constraint_values: Default::default(),
                 constraint_violation: 0,
+                constraint_violation_magnitude: 0.0,
                 feasible: false,
                 evaluated: false,
             },
@@ -531,6 +626,7 @@ mod tests {
             objective_fitness_values: Default::default(),
             constraint_values: Default::default(),
             constraint_violation: 0,
+            constraint_violation_magnitude: 0.0,
             feasible: false,
             evaluated: false,
         };
@@ -540,6 +636,7 @@ mod tests {
             objective_fitness_values: Default::default(),
             constraint_values: Default::default(),
             constraint_violation: 0,
+            constraint_violation_magnitude: 0.0,
             feasible: false,
             evaluated: false,
         };
@@ -558,6 +655,7 @@ mod tests {
             objective_fitness_values: Default::default(),
             constraint_values: Default::default(),
             constraint_violation: 0,
+            constraint_violation_magnitude: 0.0,
             feasible: false,
             evaluated: false,
         };
@@ -567,6 +665,7 @@ mod tests {
             objective_fitness_values: Default::default(),
             constraint_values: Default::default(),
             constraint_violation: 0,
+            constraint_violation_magnitude: 0.0,
             feasible: false,
             evaluated: false,
         };
@@ -585,6 +684,7 @@ mod tests {
             objective_fitness_values: Default::default(),
             constraint_values: Default::default(),
             constraint_violation: 0,
+            constraint_violation_magnitude: 0.0,
             feasible: false,
             evaluated: false,
         };
@@ -594,6 +694,7 @@ mod tests {
             objective_fitness_values: Default::default(),
             constraint_values: Default::default(),
             constraint_violation: 0,
+            constraint_violation_magnitude: 0.0,
             feasible: false,
             evaluated: false,
         };
@@ -612,6 +713,7 @@ mod tests {
             objective_fitness_values: Default::default(),
             constraint_values: Default::default(),
             constraint_violation: 0,
+            constraint_violation_magnitude: 0.0,
             feasible: false,
             evaluated: false,
         };
@@ -621,6 +723,7 @@ mod tests {
             objective_fitness_values: Default::default(),
             constraint_values: Default::default(),
             constraint_violation: 0,
+            constraint_violation_magnitude: 0.0,
             feasible: false,
             evaluated: false,
         };

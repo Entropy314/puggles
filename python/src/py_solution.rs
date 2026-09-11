@@ -17,6 +17,9 @@ pub struct PySolution {
     pub feasible: bool,
     #[pyo3(get)]
     pub constraint_violation: usize,
+    /// Total magnitude of constraint violation (0.0 when feasible).
+    #[pyo3(get)]
+    pub constraint_violation_magnitude: f64,
 }
 
 #[pymethods]
@@ -38,6 +41,7 @@ impl PySolution {
             evaluated: sol.evaluated,
             feasible: sol.feasible,
             constraint_violation: sol.constraint_violation,
+            constraint_violation_magnitude: sol.constraint_violation_magnitude,
         }
     }
 }
