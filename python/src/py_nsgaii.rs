@@ -10,11 +10,11 @@ use puggles::genetic_operators::mutation::{
     BitFlipMutation, GaussianMutation, Mutation, MutationManager, PolynomialMutation,
     UniformMutation,
 };
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 #[cfg(feature = "gpu")]
 use crate::py_gpu::PyGpuProblem;
+use crate::py_recorder::{native_recorder, record, record_without_hold, run_watched_with_gil, GpuEval};
 use crate::py_operators::{PyCrossoverConfig, PyMutationConfig};
 use crate::py_problem::{set_active_problem_id, PyProblem};
 use crate::py_solution::PySolution;
@@ -29,6 +29,8 @@ pub(crate) struct StoreData {
     pub(crate) problem_id: u64,
     pub(crate) uses_python_callable: bool,
     pub(crate) uses_batch_callable: bool,
+    /// The GpuProblem's shader evaluator, if this is one.
+    pub(crate) gpu: GpuEval,
 }
 
 pub(crate) fn extract_store(py: Python<'_>, obj: &PyObject) -> PyResult<StoreData> {
@@ -39,6 +41,7 @@ pub(crate) fn extract_store(py: Python<'_>, obj: &PyObject) -> PyResult<StoreDat
             problem_id: b.store.problem_id,
             uses_python_callable: b.store.uses_python_callable,
             uses_batch_callable: b.store.uses_batch_callable,
+            gpu: None,
         });
     }
     #[cfg(feature = "gpu")]
@@ -49,6 +52,7 @@ pub(crate) fn extract_store(py: Python<'_>, obj: &PyObject) -> PyResult<StoreDat
             problem_id: b.store.problem_id,
             uses_python_callable: b.store.uses_python_callable,
             uses_batch_callable: b.store.uses_batch_callable,
+            gpu: Some(Arc::clone(&b.evaluator)),
         });
     }
     Err(pyo3::exceptions::PyTypeError::new_err(
@@ -138,7 +142,7 @@ impl PyNSGAII {
     ///     max_nfe: Maximum number of objective function evaluations.
     ///     callback: Optional callable invoked after each iteration.
     ///               Signature: `(archive, population, nfe) -> bool | None`
-    ///               Return `False` to stop early.
+    ///               Return `False` to stop early. A `Dashboard` works here and is fastest.
     #[pyo3(signature = (max_nfe, callback = None))]
     fn run(&mut self, py: Python<'_>, max_nfe: usize, callback: Option<PyObject>) -> PyResult<()> {
         // Apply Rayon thread pool size (best-effort; ignored if already set)
@@ -163,6 +167,11 @@ impl PyNSGAII {
         if store.uses_batch_callable {
             crate::py_problem::set_active_batch_problem_id(store.problem_id);
         }
+        #[cfg(feature = "gpu")]
+        if let Some(gpu) = &store.gpu {
+            crate::py_gpu::set_active_gpu_evaluator(Arc::clone(gpu));
+        }
+        let gpu = store.gpu.clone();
 
         // Build operator managers from optional configs
         let crossover_manager = self
@@ -174,6 +183,10 @@ impl PyNSGAII {
             .as_ref()
             .map(|cfg| build_mutation_manager(&cfg.borrow(py), store.problem.solution_length));
 
+        // A dashboard add-on's callback records straight from the Rust solutions and needs no
+        // GIL, so a pure-Rust objective keeps full parallelism while it's being watched.
+        let dashboard = native_recorder(py, callback.as_ref())?;
+        let callback = if dashboard.is_some() { None } else { callback };
         let needs_gil =
             store.uses_python_callable || store.uses_batch_callable || callback.is_some();
 
@@ -189,38 +202,41 @@ impl PyNSGAII {
                 ga.mutation_manager = mm;
             }
 
-            if let Some(ref cb) = callback {
-                // Step-by-step loop with per-iteration callback.
-                ga.initialize();
-                // Evaluate the initial population (single-eval callables only).
-                {
-                    let pop = &mut ga.population;
-                    for s in pop.iter_mut().filter(|s| !s.evaluated) {
-                        s.evaluate();
-                        ga.nfe.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-                while ga.get_nfe() < max_nfe {
-                    ga.iterate();
-                    ga.update_archive();
+            if let Some(ref dash) = dashboard {
+                run_watched_with_gil(
+                    py,
+                    dash,
+                    |on_gen| ga.run_with(max_nfe, |g| on_gen(g)),
+                    |g: &mut NSGAII| record_without_hold(dash, g, &gpu),
+                )?;
+            } else if let Some(ref cb) = callback {
+                // `run_with` evaluates every kind of objective (including batch and GpuProblem)
+                // and keeps the budget exact. A raised exception stops the run and is re-raised.
+                let mut error: Option<PyErr> = None;
+                ga.run_with(max_nfe, |ga| {
                     let archive: Vec<PySolution> =
                         ga.get_archive().iter().map(PySolution::from_core_solution).collect();
                     let population: Vec<PySolution> =
                         ga.population.iter().map(PySolution::from_core_solution).collect();
-                    let result = cb.call1(py, (archive, population, ga.get_nfe()))?;
-                    if let Ok(false) = result.extract::<bool>(py) {
-                        break;
+                    match cb.call1(py, (archive, population, ga.get_nfe())) {
+                        Ok(result) => !matches!(result.extract::<bool>(py), Ok(false)),
+                        Err(e) => {
+                            error = Some(e);
+                            false
+                        }
                     }
+                });
+                if let Some(e) = error {
+                    return Err(e);
                 }
             } else {
                 ga.run(max_nfe);
             }
 
-            self.last_archive =
-                ga.get_archive().iter().map(PySolution::from_core_solution).collect();
-            self.last_population =
-                ga.population.iter().map(PySolution::from_core_solution).collect();
             self.last_nfe = ga.get_nfe();
+            self.last_archive = ga.take_archive().into_iter().map(PySolution::from_owned).collect();
+            self.last_population =
+                std::mem::take(&mut ga.population).into_iter().map(PySolution::from_owned).collect();
         } else {
             // Pure-Rust or GPU objective, no Python callback: release the GIL for true
             // Rayon parallelism. `Arc<Problem>` is Send + Sync, so it moves in directly.
@@ -240,16 +256,19 @@ impl PyNSGAII {
                 if let Some(mm) = mutation_manager {
                     ga.mutation_manager = mm;
                 }
-                ga.run(max_nfe);
-                let archive = ga.get_archive().to_vec();
-                let population = ga.population.clone();
+                match dashboard {
+                    Some(dash) => {
+                        ga.run_with(max_nfe, |ga| record(&dash, ga, &gpu));
+                        dash.finish();
+                    }
+                    None => ga.run(max_nfe),
+                }
                 let nfe = ga.get_nfe();
-                (archive, population, nfe)
+                (ga.take_archive(), std::mem::take(&mut ga.population), nfe)
             });
 
-            self.last_archive = archive.iter().map(PySolution::from_core_solution).collect();
-            self.last_population =
-                population.iter().map(PySolution::from_core_solution).collect();
+            self.last_archive = archive.into_iter().map(PySolution::from_owned).collect();
+            self.last_population = population.into_iter().map(PySolution::from_owned).collect();
             self.last_nfe = nfe;
         }
 
@@ -270,6 +289,12 @@ impl PyNSGAII {
     #[getter]
     fn nfe(&self) -> usize {
         self.last_nfe
+    }
+
+    /// The problem this optimizer was created with.
+    #[getter]
+    fn problem(&self, py: Python<'_>) -> PyObject {
+        self.problem.clone_ref(py)
     }
 
     fn __repr__(&self) -> String {

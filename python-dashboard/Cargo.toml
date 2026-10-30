@@ -1,0 +1,21 @@
+# The optional visual add-on for the puggles Python package: `pip install "puggles[dashboard]"`.
+# Its own workspace, like python/, so this cdylib stays isolated from the root crate.
+[workspace]
+
+[package]
+name = "puggles-dashboard-python"
+version = "0.3.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+puggles = { path = "..", version = "0.3.0", features = ["plot", "recorder-abi"] }
+pyo3 = { version = "0.25", features = ["extension-module", "abi3-py39"] }
+
+[profile.release]
+lto = true
+codegen-units = 1

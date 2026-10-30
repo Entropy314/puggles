@@ -1,8 +1,8 @@
 # puggles — User Guide
 
-puggles is a Rust implementation of NSGA-II (Non-dominated Sorting Genetic Algorithm II). It handles single- and multi-objective optimization over continuous, integer, and binary decision variables, with optional constraint handling, parallel evaluation (Rayon), and optional GPU acceleration.
+puggles is a Rust implementation of NSGA-II (Non-dominated Sorting Genetic Algorithm II) and NSGA-III (its reference-point successor for many objectives). It handles single- and multi-objective optimization over continuous, integer, and binary decision variables, with constraint handling, parallel evaluation (Rayon), seeded reproducible runs, and optional GPU acceleration and browser visualization.
 
-> This guide covers the Rust library. The Python bindings live in `python/` — build them with `cd python && maturin develop --release`.
+> This guide covers the Rust library. For Python, `pip install puggles` (source in `python/`); the live dashboard is a separate, optional wheel, `pip install "puggles[dashboard]"` (source in `python-dashboard/`). To build them from a checkout: `maturin develop --release -m python/Cargo.toml` and, for the dashboard, `maturin develop --release -m python-dashboard/Cargo.toml`.
 
 ---
 
@@ -20,28 +20,36 @@ puggles is a Rust implementation of NSGA-II (Non-dominated Sorting Genetic Algor
    - [Built-in benchmark objectives](#6-built-in-benchmark-objectives)
    - [Custom operators](#7-custom-operators)
    - [Per-generation inspection & early stop](#8-per-generation-inspection--early-stop)
+   - [Many objectives with NSGA-III](#9-many-objectives-with-nsga-iii)
+   - [Reproducibility, checkpoints & metrics](#10-reproducibility-checkpoints--metrics)
 5. [Execution Modes](#execution-modes)
 6. [GPU Acceleration](#gpu-acceleration)
-7. [Dominance & Sorting](#dominance--sorting)
-8. [Reference](#reference)
-9. [Tips](#tips)
+7. [Visualization & Dashboard](#visualization--dashboard)
+8. [Dominance & Sorting](#dominance--sorting)
+9. [Reference](#reference)
+10. [Tips](#tips)
 
 ---
 
 ## Installation
 
-Not published to crates.io. Depend on it by path or git in your `Cargo.toml`:
-
 ```toml
 [dependencies]
-puggles = { path = "path/to/puggles" }
+puggles = "0.3"
 ```
 
-GPU evaluation is behind an optional feature (adds `wgpu` + `pollster`):
+Everything beyond the optimizers is behind optional features, off by default:
+
+| Feature | Adds | Extra dependencies |
+|---|---|---|
+| `plot` | [`puggles::plot`](#visualization--dashboard): ggplot-style figures, run recording, a live browser dashboard | `serde_json` |
+| `gpu` | [`puggles::gpu_evaluator`](#gpu-acceleration): objectives in a WGSL compute shader | `wgpu`, `pollster` |
 
 ```toml
-puggles = { path = "path/to/puggles", features = ["gpu"] }
+puggles = { version = "0.3", features = ["plot", "gpu"] }
 ```
+
+(`recorder-abi` is internal: the native interface between the Python wheel and its dashboard add-on.)
 
 Requires a recent stable Rust toolchain (the `gpu` feature needs a wgpu-compatible driver at runtime).
 
@@ -205,9 +213,9 @@ let problem = Arc::new(Problem::new(
 ));
 ```
 
-Default operators by type:
-- `Real` → SBX crossover + uniform mutation
-- `Integer` → uniform crossover + uniform mutation
+Default operators by type (every mutation at the per-gene rate `1/n`):
+- `Real` → SBX crossover + polynomial mutation
+- `Integer` → uniform crossover + polynomial mutation (rounded to the integer grid)
 - `BitBinary` → uniform crossover + bit-flip mutation
 
 ### 5. Batch Evaluation
@@ -328,6 +336,70 @@ while budget < 20_000 {
 
 For a wall-clock budget instead, use `run_timed(max_nfe, Duration)` which stops at whichever of the NFE budget or the time limit comes first.
 
+To observe every generation without chunking, use `run_with` (on both `NSGAII` and `NSGAIII`). The closure sees the optimizer after each generation; return `false` to stop:
+
+```rust
+ga.run_with(20_000, |ga| {
+    println!("nfe={:6}  archive={:3}", ga.get_nfe(), ga.get_archive().len());
+    ga.get_archive().len() < 80 // stop once the front has 80 solutions
+});
+```
+
+Observing a run doesn't change it: with the same seed, `run_with` produces exactly the archive `run` does.
+
+To stop when the front stops moving rather than at a fixed budget, `run_until_converged(max_nfe, patience, epsilon)` ends once no objective's best value has improved by more than `epsilon` for `patience` generations, and returns the number of generations run.
+
+### 9. Many Objectives with NSGA-III
+
+Crowding distance spreads a front well for 2 objectives but poorly from about 3 on. [`NSGAIII`](src/nsga3.rs) replaces it with a grid of structured reference points (Das–Dennis): survivors are spread across the grid, which keeps the front diverse with 3, 5 or 10 objectives.
+
+```rust
+use puggles::nsga3::{das_dennis, NSGAIII};
+
+assert_eq!(das_dennis(3, 12).len(), 91); // reference points for 3 objectives, 12 divisions
+
+// population_size 0 = the reference-point count rounded up to a multiple of 4 (here 92).
+let mut ga = NSGAIII::new(Arc::clone(&problem), 0, 12, ExecutionMode::MultiThreaded).with_seed(7);
+ga.run(40_000);
+println!("{} solutions on the front", ga.get_archive().len());
+```
+
+The API mirrors `NSGAII`: `run`, `run_with`, `get_archive`, `get_nfe`, `with_seed`, `execution_info`, `last_generation_times`. Operators are the crate defaults (SBX + polynomial mutation). NSGA-III evaluates one solution at a time (no batch or GPU objectives).
+
+**Steering.** Between generations, `focus_on(&aspiration, spread)` shrinks the reference grid around target objective values (one per objective, `f64::NAN` = no preference) so the search concentrates there; `spread` in (0, 1] sets how tightly (1 = the whole front). `clear_focus()` returns to the uniform grid:
+
+```rust
+ga.run_with(60_000, |ga| {
+    if ga.get_nfe() > 20_000 {
+        ga.focus_on(&[0.2, f64::NAN, 0.5], 0.3); // near f1 = 0.2, f3 = 0.5
+    }
+    true
+});
+```
+
+### 10. Reproducibility, Checkpoints & Metrics
+
+**Seeds.** `with_seed(seed)` on either optimizer seeds the initial population, crossover, mutation and selection; the same seed and problem give a bit-identical run. Use `ExecutionMode::Sequential` with it: multithreaded evaluation interleaves non-deterministically.
+
+**Checkpoints.** `save_state()` snapshots the population, archive and NFE as a [`GaState`](src/checkpoint.rs) (serde-serializable — use any format); `load_state(state)` restores it against the same `Problem`, and `run` then resumes from the restored NFE:
+
+```rust
+let state = ga.save_state();
+let json = serde_json::to_string(&state)?; // or bincode, ...
+// ... later, possibly in another process:
+let mut resumed = NSGAII::new(Arc::clone(&problem), 100, ExecutionMode::MultiThreaded);
+resumed.load_state(serde_json::from_str(&json)?);
+resumed.run(50_000);
+```
+
+**Metrics.** [`puggles::metrics`](src/metrics.rs) scores minimization fronts given as objective vectors (`metrics::objective_vectors(ga.get_archive())`):
+
+| Function | Measures |
+|---|---|
+| `igd(front, reference_set)` | Inverted generational distance to a known front; lower is better |
+| `hypervolume_2d(front, [r1, r2])` | Area dominated by a 2-objective front up to a reference point; higher is better |
+| `spacing(front)` | How evenly the front is spread; lower is more even |
+
 ---
 
 ## Execution Modes
@@ -374,6 +446,141 @@ ga.run(50_000);
 
 ---
 
+## Visualization & Dashboard
+
+Enable the `plot` feature (adds only `serde_json`; nothing visual is compiled without it). From Python, the same dashboard comes as the optional `puggles-dashboard` wheel (`pip install "puggles[dashboard]"`). Everything renders in the browser with Plotly.js, which the page loads from a pinned CDN URL, so viewing needs an internet connection. There's no GUI code in Rust: the crate writes data and serves a small web page compiled into it.
+
+### Live dashboard
+
+```rust
+use puggles::plot::{Dashboard, RunMeta};
+
+let meta = RunMeta::from_problem(&problem).title("ZDT1").objective_names(["cost", "risk"]);
+let dash = Dashboard::start(meta, "127.0.0.1", 0)?; // port 0 = any free port
+dash.open_browser();                                  // prints the URL, opens a tab
+ga.run_with(50_000, |ga| dash.record(ga));            // false once Stop is pressed
+dash.finish();
+dash.save_html("run.html")?;                          // self-contained replay page
+dash.wait();                                          // keep serving until Ctrl+C
+```
+
+The page shows:
+
+- **Objective space**: a 2-D scatter, 3-D scatter, parallel coordinates, or scatter matrix, picked by default from the objective count. Axes and colour-by are selectable. Optional layers:
+  - **True front:** drawn faintly when the run's metadata includes one.
+  - **Trails:** earlier fronts, fading with age.
+  - **Constraint violations:** colours the population; feasible members stay grey.
+- **Decision variables**: parallel coordinates against each variable's bounds, or a heatmap for many variables.
+- **Convergence**, plotted against evaluations. The options are:
+  - IGD to the true front.
+  - Normalized hypervolume: exact for 2–3 objectives, a Monte Carlo estimate for 4 or more.
+  - Best value per objective.
+  - Front size.
+  - Feasible share of the population.
+  - Evaluations per second.
+  - **Time per generation**: a stacked breakdown of evaluation, sorting and selection, variation, archive, dashboard overhead, and unexplained time. This tells you, for example, whether the GPU is actually your bottleneck.
+- **Solutions table**: sortable.
+  - Click a row or point to inspect a solution in every view.
+  - **Pin** up to four solutions and open the *Pinned* tab to compare them side by side. The best value per objective is in bold, and variables that differ from P1 are shaded. Export the pinned solutions as CSV or JSON.
+  - **★ Balanced** selects the most even trade-off: the solution whose worst objective, normalized to the front's range, is smallest.
+  - **Filter** by lassoing points (2-D or matrix) or by dragging along any parallel-coordinates axis. The filters combine, survive live updates, and limit both the table and the CSV export.
+- **Goals** (side panel): set a target for any objective.
+  - Solutions meeting every target are marked "meets".
+  - The rest are ranked by their *goal gap*: how far their worst objective misses, as a share of the front's range. It's a table column and a colour-by option, and you can list only the solutions that meet the goals.
+  - With NSGA-III, **Steer** concentrates the run near the goals (R-NSGA-III-style focused reference points), and the change is marked on the convergence chart.
+- **Drivers** (decision-variables card): rank correlation between each variable and each objective or custom column across the front, strongest first. Click a cell to colour the front by that variable.
+- **Results** (side panel, with two or more runs): each group's final metric (median, IQR, mean ± sd) and a two-sided Mann–Whitney U test against the best group. The panel warns when the group sizes are too small for any p-value to reach 0.05. The convergence chart can also show *Median by group* with IQR bands instead of one line per run.
+- **Plateau**: a marker where the run came within 1% of its final value ("the last 60% of evaluations added <1%").
+- **Notifications** (bell): a browser notification when a run finishes or plateaus.
+- **Report**: a one-page HTML report with the summary, results, goals, chosen and pinned solutions, and the charts.
+- **Accessibility**: a shapes mode that tells runs apart by marker shape and line style, not only colour (on automatically in forced-colours mode). Keyboard shortcuts (press `?`), and screen-reader announcements for state and selection changes.
+- **Pause / Resume / Stop**: hold a live run after the current generation, inspect it, then continue.
+- **Compare runs**: overlay saved runs (*Compare runs…* accepts `.pgrun.json` and `.pgrun.json.gz`), each in its own colour. Their fronts are shown at the same evaluation budget as the generation you're viewing, and their convergence curves share one axis.
+- **Scrubber**: replay generation by generation. The view, axes, metric and generation are kept in the URL, so a link reopens the same view. Every chart's camera button saves a PNG; the disk button saves an SVG.
+
+The header shows **where evaluations actually run**: a green `GPU · <device>` badge with a live count of solutions evaluated on the GPU, `CPU · N threads`, or an orange `GPU not used` badge when GPU was requested but isn't happening. Hover the badge for the reason, e.g. no `GpuEvaluator` attached, built without the `gpu` feature, or NSGA-III, which has no GPU path. The header also shows live evaluations per second, and the same information is available in code as `ga.execution_info()` and `ga.gpu_evaluations()`.
+
+The server binds to 127.0.0.1 and pushes at most 10 updates a second, so it never slows a fast run. Recording costs one copy of the archive and population objectives per generation. History is capped at 500 frames by default and thinned evenly beyond that; use `Dashboard::start_with(RunHistory::new(meta).with_max_frames(n), ..)` to change the cap.
+
+### Comparing runs, true fronts, pausing
+
+```rust
+use puggles::plot::{reference, Dashboard, RunHistory, RunMeta};
+
+let meta = RunMeta::from_problem(&problem).reference_front(reference::dtlz2(3, 12)); // enables IGD
+let dash = Dashboard::start(meta, "127.0.0.1", 0)?;
+dash.keep_runs(true); // each finished run stays overlaid when the next one starts
+for seed in 0..3 {
+    let mut ga = NSGAII::new(Arc::clone(&problem), 100, ExecutionMode::MultiThreaded).with_seed(seed);
+    ga.run_with(20_000, |ga| dash.record(ga));
+}
+dash.compare_with("baseline", RunHistory::load_json("baseline.pgrun.json")?);
+dash.pause(); // what the page's Pause button does; `resume()` continues
+```
+
+Steering, your own columns, groups, events and remote access:
+
+```rust
+// Steer: goals set in the page focus an NSGA-III run (call apply_focus before record).
+ga.run_with(50_000, |ga| { dash.apply_focus(ga); dash.record(ga) });
+// Or focus directly: ga.focus_on(&[0.2, 0.2, f64::NAN], 0.25); ga.clear_focus();
+
+dash.set_columns(vec!["weight".into()], |x| vec![x.iter().sum()]); // computed per front solution
+dash.set_group("NSGA-II, pop 100");      // applies to the run that starts next
+dash.add_event(ga.get_nfe(), "raised mutation rate");
+dash.set_max_points(2_000);              // population sample per frame (default 2,000)
+
+// Remote: bound beyond loopback, a token is required by default and included in dash.url().
+let remote = Dashboard::start(meta, "0.0.0.0", 8765)?; // or dash.require_token(None) behind a tunnel
+```
+
+To view a dashboard running on a remote machine without exposing it, tunnel the port instead: `ssh -L 8765:127.0.0.1:8765 user@host`, then open `http://127.0.0.1:8765/` locally.
+
+`reference` has `zdt1`, `zdt2`, `dtlz1`, `dtlz2` (also covering DTLZ3 and DTLZ4), and `by_name`. Phase timings are available without the dashboard too, as `ga.last_generation_times()`. If you embed the dashboard and need to release a lock while a run is paused (as the Python binding does with the GIL), use `record_without_hold` followed by `hold_for(timeout)` in a loop.
+
+### Recording without a server
+
+```rust
+use puggles::plot::{RunHistory, RunMeta};
+
+let mut history = RunHistory::new(RunMeta::from_problem(&problem));
+ga.run_with(50_000, |ga| { history.record(ga); true });
+history.save_html("run.html")?;        // full dashboard, offline
+history.save_json("run.pgrun.json")?;  // `python -m puggles.dashboard run.pgrun.json`
+history.to_html_compared(&[("other seed".into(), other_history)]); // replay page with overlays
+```
+
+### ggplot-style figures
+
+```rust
+use puggles::plot::{aes, ggplot, Field::*};
+
+ggplot(ga.get_archive())                            // one row per solution
+    .aes(aes().x(Obj(0)).y(Obj(1)).color(Var(2)))
+    .geom_point()
+    .title("Pareto front")
+    .save("front.html")?;                           // or .show() to open it
+
+ggplot(&history).aes(aes().x(Nfe).y(Obj(0))).geom_line().show()?;           // convergence
+ggplot(&population).aes(aes().x(Obj(0)).y(Obj(1)).z(Obj(2)).color(Rank))
+    .geom_point().scale_color_categorical().show()?;                       // 3-D
+ggplot(ga.get_archive()).geom_parallel([Obj(0), Obj(1), Obj(2), Obj(3)]).show()?;
+```
+
+| Piece | Options |
+|---|---|
+| Data | `&[Solution]` (columns `f1..`, `x1..`, `feasible`, `rank`), `&RunHistory` (`gen`, `nfe`, `time`, `front_size`, best `f1..`), or `PlotData::new().column(name, values)` |
+| Fields | `Obj(i)`, `Var(j)`, `Feasible`, `Rank`, `Gen`, `Nfe`, `Time`, `FrontSize`, `"any column"` |
+| Geoms | `geom_point` (3-D when `z` is mapped), `geom_line`, `geom_histogram().bins(n)`, `geom_parallel(dims)`, `geom_splom(dims)` |
+| Per layer | `layer_aes(..)`, `size`, `alpha`, `width`, `bins` (apply to the latest geom) |
+| Labels | `title`, `xlab`, `ylab`, `zlab`, `color_lab` |
+| Scales | `scale_x_log10`, `scale_y_log10`, `scale_color_sequential` (default for numbers), `scale_color_diverging`, `scale_color_categorical` |
+| Theme | `theme_auto` (follows the viewer), `theme_light`, `theme_dark` |
+
+Mistakes such as an unknown field (`Obj(5)` on a 2-objective problem) or `geom_point` without `y` come back as `Err(PlotError)` from `save`/`show`/`to_json`; they don't panic. Set `PUGGLES_NO_BROWSER=1` to stop `show()` and `open_browser()` from launching a browser, e.g. in CI. A runnable tour: `cargo run --release --features plot --example plot_pareto`. For a live run, add `-- --live [--problem zdt1|knapsack|knapsack3|dtlz2-5] [--gpu] [--pace-ms N]`. `knapsack` is a 250-item, 2-knapsack 0/1 problem with capacity constraints; `knapsack3` uses 3 knapsacks with NSGA-III. `--gpu` evaluates ZDT1 or the knapsack in a WGSL shader and needs `--features plot,gpu`.
+
+---
+
 ## Dominance & Sorting
 
 The default and only built-in comparator is **Pareto dominance**. The sorting primitives are public in [`puggles::dominance`](src/dominance.rs):
@@ -413,8 +620,8 @@ Construct with `Problem::new(...)` (single objective fn) or a struct literal (ne
 | Field | Type | Description |
 |---|---|---|
 | `solution` | `Vec<f64>` | Decision variable values |
-| `objective_fitness_values` | `Vec<f64>` | Objective values |
-| `constraint_values` | `Vec<f64>` | `1.0` = satisfied, `0.0` = violated, per constraint |
+| `objective_fitness_values` | `ObjVec` | Objective values (a `SmallVec<[f64; 4]>`: indexes and iterates like a `Vec`; `.to_vec()` for one) |
+| `constraint_values` | `ObjVec` | `1.0` = satisfied, `0.0` = violated, per constraint |
 | `feasible` | `bool` | `true` if all constraints satisfied |
 | `constraint_violation` | `usize` | Count of violated constraints |
 | `evaluated` | `bool` | `true` once the objective has been computed |
@@ -430,15 +637,27 @@ Construct with `Problem::new(...)` (single objective fn) or a struct literal (ne
 | `evaluate_population(&mut Vec<Solution>)` | `()` | Evaluate a population slice (respects mode / batch) |
 | `iterate()` | `()` | One full generation |
 | `iterate_n(n)` | `()` | One generation producing at most `n` offspring |
+| `with_seed(seed)` | `Self` | Seed all randomness for a reproducible run; builder-style |
 | `run(max_nfe)` | `()` | Run to the NFE budget (auto-initializes) |
+| `run_with(max_nfe, \|ga\| -> bool)` | `()` | `run`, calling the closure after each generation; `false` stops |
 | `run_timed(max_nfe, Duration)` | `()` | Stop at the NFE budget or time limit, whichever first |
+| `run_until_converged(max_nfe, patience, epsilon)` | `usize` | Stop once the per-objective bests plateau; returns generations run |
 | `update_archive()` | `()` | Fold the current non-dominated feasible set into the archive |
 | `get_archive()` | `&[Solution]` | Pareto archive |
+| `take_archive()` | `Vec<Solution>` | Move the archive out (leaves it empty) |
 | `get_nfe()` | `usize` | Total evaluations so far |
 | `effective_mode()` | `ExecutionMode` | The path evaluation will actually take |
+| `execution_info()` | `ExecutionInfo` | Requested vs effective mode, CPU threads, GPU device, and why they differ |
+| `gpu_evaluations()` | `Option<usize>` | Solutions evaluated on the GPU so far, if an evaluator is attached |
+| `last_generation_times()` | `GenerationTimes` | Seconds the last generation spent in variation, evaluation, selection and archive update |
+| `save_state()` / `load_state(GaState)` | `GaState` / `()` | Checkpoint and resume ([§10](#10-reproducibility-checkpoints--metrics)) |
 | `with_gpu_evaluator(GpuEvaluator)` | `Self` | (feature `gpu`) attach a GPU evaluator; builder-style |
 
 Public fields worth knowing: `population: Vec<Solution>`, `archive: Vec<Solution>`, `crossover_manager`, `mutation_manager`, `execution_mode`.
+
+### `NSGAIII`
+
+`NSGAIII::new(problem: Arc<Problem>, population_size: usize /* 0 = derived */, divisions: usize, execution_mode: ExecutionMode)`. Methods: `with_seed`, `run`, `run_with`, `get_archive`, `take_archive`, `get_nfe`, `reference_points`, `focus_on`, `clear_focus`, `execution_info`, `last_generation_times` — see [§9](#9-many-objectives-with-nsga-iii).
 
 ---
 

@@ -382,6 +382,17 @@ impl CrossoverManager {
         parent2: &Solution,
         rng: &mut SmallRng,
     ) -> Vec<Solution> {
+        let (child1, child2) = self.perform_crossover_pair(parent1, parent2, rng);
+        vec![child1, child2]
+    }
+
+    /// [`perform_crossover`](Self::perform_crossover) without the `Vec` allocation per pair.
+    pub fn perform_crossover_pair(
+        &self,
+        parent1: &Solution,
+        parent2: &Solution,
+        rng: &mut SmallRng,
+    ) -> (Solution, Solution) {
         let types = &parent1.problem.solution_data_types;
 
         // Each operator only touches genes of its own type (others pass through unchanged),
@@ -429,7 +440,7 @@ impl CrossoverManager {
         child2.evaluated = false;
         child2.feasible = false;
 
-        vec![child1, child2]
+        (child1, child2)
     }
 }
 

@@ -42,6 +42,9 @@ pub struct GpuEvaluator {
     /// Read-only auxiliary data bound at `@group(0) @binding(3)` (e.g. a covariance matrix),
     /// so data-driven objectives can run on the GPU. Empty when the objective is self-contained.
     data_buffer: wgpu::Buffer,
+    adapter: wgpu::AdapterInfo,
+    /// Solutions evaluated so far — proof the GPU is doing the work, not just configured.
+    evaluated: std::sync::atomic::AtomicUsize,
     pub solution_length: usize,
     pub num_objectives: usize,
 }
@@ -194,9 +197,26 @@ impl GpuEvaluator {
             pipeline,
             bind_group_layout,
             data_buffer,
+            adapter: info,
+            evaluated: std::sync::atomic::AtomicUsize::new(0),
             solution_length,
             num_objectives,
         }
+    }
+
+    /// The adapter in use (name, vendor, device type, backend, driver).
+    pub fn adapter_info(&self) -> &wgpu::AdapterInfo {
+        &self.adapter
+    }
+
+    /// `"<name> (<device type>, <backend>)"`, as printed when the evaluator starts.
+    pub fn device_description(&self) -> String {
+        format!("{} ({:?}, {:?})", self.adapter.name, self.adapter.device_type, self.adapter.backend)
+    }
+
+    /// Solutions evaluated on the GPU since this evaluator was created.
+    pub fn evaluated_count(&self) -> usize {
+        self.evaluated.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Evaluate a batch of solutions on the GPU.
@@ -208,6 +228,7 @@ impl GpuEvaluator {
         if pop_size == 0 {
             return Vec::new();
         }
+        self.evaluated.fetch_add(pop_size, std::sync::atomic::Ordering::Relaxed);
 
         // Pack solutions into a flat f32 buffer (GPU works in f32)
         let input_data: Vec<f32> = solutions

@@ -1,0 +1,37 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "puggles-dashboard"
+version = "0.3.0"
+description = "Live browser dashboard, run replay and comparison for puggles (NSGA-II / NSGA-III) — the optional visual add-on"
+readme = "README.md"
+license = { text = "MIT OR Apache-2.0" }
+authors = [{ name = "Entropy314" }]
+requires-python = ">=3.9"
+# Same release as the core: the two wheels talk through a versioned native interface.
+dependencies = ["puggles==0.3.0"]
+keywords = ["genetic-algorithm", "optimization", "nsga2", "nsga3", "multi-objective", "pareto", "dashboard", "visualization"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Visualization",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+
+[project.urls]
+Homepage = "https://github.com/Entropy314/puggles"
+Repository = "https://github.com/Entropy314/puggles"
+Issues = "https://github.com/Entropy314/puggles/issues"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+manifest-path = "Cargo.toml"
+module-name = "puggles_dashboard._native"
+python-source = "pysrc"

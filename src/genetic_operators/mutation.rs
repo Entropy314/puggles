@@ -6,6 +6,9 @@ use rand::Rng;
 use rand::rngs::SmallRng;
 
 /// Trait for mutation operations. `rng` is threaded through so a seeded run is reproducible.
+///
+/// [`MutationManager`] mutates a child in place, gene by gene, so `parent` is that child: an
+/// implementation should read only gene `index` (genes before it may already be mutated).
 pub trait Mutation: Send + Sync {
     fn mutate(&self, parent: &Solution, index: usize, rng: &mut SmallRng) -> f64;
 }
@@ -45,15 +48,26 @@ impl MutationManager {
     }
 
     pub fn mutate(&self, parent: &Solution, rng: &mut SmallRng) -> Solution {
-        let mut child = parent.clone();
-        for (i, solution_type) in parent.problem.solution_data_types.iter().enumerate() {
-            let key = match solution_type {
-                SolutionDataTypes::BitBinary(_) => "BitBinary",
-                SolutionDataTypes::Real(_) => "Real",
-                SolutionDataTypes::Integer(_) => "Integer",
+        self.mutate_owned(parent.clone(), rng)
+    }
+
+    /// [`mutate`](Self::mutate) on a child you already own (e.g. fresh from crossover), with
+    /// no extra clone. Bit-identical to `mutate`: each operator reads only its own gene.
+    pub fn mutate_owned(&self, mut child: Solution, rng: &mut SmallRng) -> Solution {
+        // Resolve the three operators once, not with a map lookup per gene.
+        let binary = self.default_mutations.get("BitBinary");
+        let real = self.default_mutations.get("Real");
+        let integer = self.default_mutations.get("Integer");
+        let problem = Arc::clone(&child.problem);
+        for (i, solution_type) in problem.solution_data_types.iter().enumerate() {
+            let mutation = match solution_type {
+                SolutionDataTypes::BitBinary(_) => binary,
+                SolutionDataTypes::Real(_) => real,
+                SolutionDataTypes::Integer(_) => integer,
             };
-            if let Some(mutation) = self.default_mutations.get(key) {
-                child.solution[i] = mutation.mutate(parent, i, rng);
+            if let Some(mutation) = mutation {
+                let value = mutation.mutate(&child, i, rng);
+                child.solution[i] = value;
             }
         }
         child.feasible = false;

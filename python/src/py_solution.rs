@@ -30,6 +30,18 @@ impl PySolution {
 }
 
 impl PySolution {
+    /// Like [`from_core_solution`](Self::from_core_solution), moving the variables out.
+    pub fn from_owned(sol: Solution) -> Self {
+        PySolution {
+            objectives: sol.objective_fitness_values.to_vec(),
+            constraints: sol.constraint_values.to_vec(),
+            evaluated: sol.evaluated,
+            feasible: sol.feasible,
+            constraint_violation: sol.constraint_violation,
+            variables: sol.solution,
+        }
+    }
+
     pub fn from_core_solution(sol: &Solution) -> Self {
         PySolution {
             variables: sol.solution.clone(),

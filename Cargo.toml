@@ -3,7 +3,7 @@ members = ["."]
 
 [package]
 name = "puggles"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.74"
 description = "Multi-objective evolutionary optimization: NSGA-II and NSGA-III over continuous, integer, and binary variables, with constraint handling, Rayon parallelism, and optional GPU evaluation."
@@ -18,6 +18,12 @@ exclude = [
     "sandbox/",
     ".idea/",
     ".vscode/",
+    ".github/",
+    ".claude/",
+    # The Python packages ship to PyPI, not crates.io.
+    "python/",
+    "python-dashboard/",
+    "scripts/",
     "OPTIMIZATION_PLAN.md",
 ]
 
@@ -26,11 +32,16 @@ all-features = true
 
 [features]
 gpu = ["dep:wgpu", "dep:pollster"]
+# Interactive plots (ggplot-style) and a live browser dashboard. Adds only serde_json.
+plot = ["dep:serde_json"]
+# Internal: the C ABI between the Python wheel and the optional puggles-dashboard wheel. No deps.
+recorder-abi = []
 
 [dependencies]
 rand = { version = "0.8.5", features = ["small_rng"] }
 rayon = "1.10.0"
 serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", optional = true }
 smallvec = "1"
 wgpu = { version = "22", optional = true }
 pollster = { version = "0.3", optional = true }
@@ -38,3 +49,7 @@ pollster = { version = "0.3", optional = true }
 [profile.release]
 lto = true
 codegen-units = 1
+
+[[example]]
+name = "plot_pareto"
+required-features = ["plot"]
