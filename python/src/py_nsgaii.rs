@@ -33,7 +33,7 @@ pub(crate) struct StoreData {
     pub(crate) gpu: GpuEval,
 }
 
-pub(crate) fn extract_store(py: Python<'_>, obj: &PyObject) -> PyResult<StoreData> {
+pub(crate) fn extract_store(py: Python<'_>, obj: &Py<PyAny>) -> PyResult<StoreData> {
     if let Ok(p) = obj.extract::<Py<PyProblem>>(py) {
         let b = p.borrow(py);
         return Ok(StoreData {
@@ -68,7 +68,7 @@ pub(crate) fn extract_store(py: Python<'_>, obj: &PyObject) -> PyResult<StoreDat
 pub struct PyNSGAII {
     /// Accepts both `Problem` and `GpuProblem`. Held so its ProblemStore (and the
     /// callable registry entry) outlives every run.
-    problem: PyObject,
+    problem: Py<PyAny>,
     population_size: usize,
     execution_mode: ExecutionMode,
     crossover_config: Option<Py<PyCrossoverConfig>>,
@@ -113,7 +113,7 @@ impl PyNSGAII {
         seed = None,
     ))]
     fn new(
-        problem: PyObject,
+        problem: Py<PyAny>,
         population_size: usize,
         execution_mode: &str,
         crossover_config: Option<Py<PyCrossoverConfig>>,
@@ -150,7 +150,7 @@ impl PyNSGAII {
     ///               Signature: `(archive, population, nfe) -> bool | None`
     ///               Return `False` to stop early. A `Dashboard` works here and is fastest.
     #[pyo3(signature = (max_nfe, callback = None))]
-    fn run(&mut self, py: Python<'_>, max_nfe: usize, callback: Option<PyObject>) -> PyResult<()> {
+    fn run(&mut self, py: Python<'_>, max_nfe: usize, callback: Option<Py<PyAny>>) -> PyResult<()> {
         // Apply Rayon thread pool size (best-effort; ignored if already set)
         if let Some(n) = self.num_threads {
             let _ = rayon::ThreadPoolBuilder::new().num_threads(n).build_global();
@@ -256,7 +256,7 @@ impl PyNSGAII {
             let seed = self.seed;
             let pending = self.pending_state.take();
 
-            let (archive, population, nfe, state) = py.allow_threads(move || {
+            let (archive, population, nfe, state) = py.detach(move || {
                 let mut ga = NSGAII::new(problem, pop_size, mode);
                 if let Some(s) = seed {
                     ga = ga.with_seed(s);
@@ -309,7 +309,7 @@ impl PyNSGAII {
 
     /// The problem this optimizer was created with.
     #[getter]
-    fn problem(&self, py: Python<'_>) -> PyObject {
+    fn problem(&self, py: Python<'_>) -> Py<PyAny> {
         self.problem.clone_ref(py)
     }
 

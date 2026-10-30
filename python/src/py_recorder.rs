@@ -14,7 +14,7 @@ use std::time::Duration;
 /// The native recorder `callback` offers, if any. One whose ABI doesn't match this build (a
 /// mismatched add-on version) is reported with a warning and `callback` is then used as a plain
 /// callable.
-pub(crate) fn native_recorder(py: Python<'_>, callback: Option<&PyObject>) -> PyResult<Option<RecorderHandle>> {
+pub(crate) fn native_recorder(py: Python<'_>, callback: Option<&Py<PyAny>>) -> PyResult<Option<RecorderHandle>> {
     let Some(cb) = callback else { return Ok(None) };
     let cb = cb.bind(py);
     if !cb.hasattr("__puggles_recorder__")? {
@@ -26,15 +26,17 @@ pub(crate) fn native_recorder(py: Python<'_>, callback: Option<&PyObject>) -> Py
         PyErr::warn(py, &warning, &std::ffi::CString::new(format!("{why}; recording through the Python callback instead")).unwrap_or_default(), 1)?;
         Ok(None)
     };
-    let Ok(capsule) = offered.downcast::<PyCapsule>() else {
+    let Ok(capsule) = offered.cast::<PyCapsule>() else {
         return refused("__puggles_recorder__() didn't return a capsule".into());
     };
-    if capsule.name()? != Some(CAPSULE_NAME) {
-        return refused(format!("unknown recorder capsule {:?}", capsule.name()?));
-    }
+    let Ok(pointer) = capsule.pointer_checked(Some(CAPSULE_NAME)) else {
+        // SAFETY: the name pointer is valid while `capsule` is alive, which it is here.
+        let name = capsule.name()?.map(|n| unsafe { n.as_cstr() }.to_string_lossy().into_owned());
+        return refused(format!("unknown recorder capsule {name:?}"));
+    };
     // SAFETY: the capsule name promises a `Recorder` from an extension module, which Python
     // never unloads; `capsule` (and so the recorder) is alive for this call.
-    match unsafe { RecorderHandle::from_raw(capsule.pointer() as *const Recorder) } {
+    match unsafe { RecorderHandle::from_raw(pointer.as_ptr() as *const Recorder) } {
         Ok(handle) => Ok(Some(handle)),
         Err(why) => refused(why),
     }
@@ -83,7 +85,7 @@ pub(crate) fn record(rec: &RecorderHandle, ga: &NSGAII, gpu: &GpuEval) -> bool {
 /// run, and let Ctrl+C through (it stops the run and is re-raised).
 pub(crate) fn hold_with_gil(py: Python<'_>, rec: &RecorderHandle) -> PyResult<bool> {
     loop {
-        if let Some(keep_going) = py.allow_threads(|| rec.hold_for(Duration::from_millis(100))) {
+        if let Some(keep_going) = py.detach(|| rec.hold_for(Duration::from_millis(100))) {
             return Ok(keep_going);
         }
         if let Err(e) = py.check_signals() {

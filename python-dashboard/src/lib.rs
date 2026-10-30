@@ -53,7 +53,7 @@ impl PyDashboard {
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
-        source: Option<PyObject>,
+        source: Option<Py<PyAny>>,
         objective_names: Option<Vec<String>>,
         variable_names: Option<Vec<String>>,
         title: Option<String>,
@@ -187,10 +187,12 @@ impl PyDashboard {
     /// The native recorder `NSGAII.run` / `NSGAIII.run` use when this dashboard is their
     /// ``callback`` — so a run records straight from the Rust solutions, without the GIL.
     fn __puggles_recorder__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyCapsule>> {
-        PyCapsule::new_with_destructor(
+        // The value sits at the start of the capsule's contents, so the capsule pointer is the
+        // `Recorder` the core reads.
+        PyCapsule::new_with_value_and_destructor(
             py,
             SendRecorder(recorder_for(self.inner.clone())),
-            Some(CAPSULE_NAME.to_owned()),
+            CAPSULE_NAME,
             // SAFETY: made by `recorder_for` just above, and the capsule is its only owner.
             |recorder, _| unsafe { drop_recorder(recorder.0) },
         )
@@ -223,7 +225,7 @@ impl PyDashboard {
     /// Overlay another run: a saved `.pgrun.json[.gz]` path, or another Dashboard.
     #[pyo3(signature = (source, name = None))]
     fn compare(&self, py: Python<'_>, source: &Bound<'_, PyAny>, name: Option<String>) -> PyResult<()> {
-        let (history, default_name) = if let Ok(other) = source.downcast::<PyDashboard>() {
+        let (history, default_name) = if let Ok(other) = source.cast::<PyDashboard>() {
             let h = other.borrow().inner.history(); // compare() needs the whole run
             let n = h.meta.title.clone().unwrap_or_else(|| "run".into());
             (h, n)
@@ -292,7 +294,7 @@ impl PyDashboard {
             if self.inner.is_closed() {
                 break Ok(());
             }
-            py.allow_threads(|| std::thread::sleep(Duration::from_millis(100)));
+            py.detach(|| std::thread::sleep(Duration::from_millis(100)));
             match py.check_signals() {
                 Ok(()) => {}
                 Err(e) if e.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py) => break Ok(()),
@@ -312,7 +314,7 @@ impl PyDashboard {
         slf
     }
 
-    fn __exit__(&self, _exc_type: PyObject, _exc: PyObject, _tb: PyObject) {
+    fn __exit__(&self, _exc_type: Py<PyAny>, _exc: Py<PyAny>, _tb: Py<PyAny>) {
         self.inner.close();
     }
 
@@ -341,7 +343,7 @@ impl PyDashboard {
 /// that raises reports its traceback once and yields NaN.
 fn set_python_columns(dash: &Dashboard, cols: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
     let mut names = Vec::new();
-    let mut funcs: Vec<PyObject> = Vec::new();
+    let mut funcs: Vec<Py<PyAny>> = Vec::new();
     for (k, v) in cols.iter() {
         if !v.is_callable() {
             return Err(PyValueError::new_err(format!("columns[{k}] must be a callable f(variables) -> float")));
@@ -351,7 +353,7 @@ fn set_python_columns(dash: &Dashboard, cols: &Bound<'_, pyo3::types::PyDict>) -
     }
     let reported = std::sync::atomic::AtomicBool::new(false);
     dash.set_columns(names, move |x: &[f64]| {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             funcs
                 .iter()
                 .map(|f| match f.call1(py, (x.to_vec(),)).and_then(|r| r.extract::<f64>(py)) {
@@ -399,7 +401,7 @@ pub fn reference_front(name: &str, number_of_objectives: usize, points: usize) -
 
 /// Metadata from a Problem/GpuProblem, or from an optimizer (its `problem` plus its class name).
 /// Read through attributes, so this wheel needs nothing from the core one but its public API.
-fn meta_from_source(py: Python<'_>, source: Option<&PyObject>) -> PyResult<RunMeta> {
+fn meta_from_source(py: Python<'_>, source: Option<&Py<PyAny>>) -> PyResult<RunMeta> {
     let Some(source) = source else { return Ok(RunMeta::default()) };
     let bound = source.bind(py);
     if bound.hasattr("variable_types")? {
@@ -432,7 +434,7 @@ fn meta_from_problem(problem: &Bound<'_, PyAny>) -> PyResult<RunMeta> {
 /// run, and let Ctrl+C through (it stops the run and is re-raised).
 fn hold_with_gil(py: Python<'_>, dash: &Dashboard) -> PyResult<bool> {
     loop {
-        if let Some(keep_going) = py.allow_threads(|| dash.hold_for(Duration::from_millis(100))) {
+        if let Some(keep_going) = py.detach(|| dash.hold_for(Duration::from_millis(100))) {
             return Ok(keep_going);
         }
         if let Err(e) = py.check_signals() {

@@ -14,7 +14,7 @@ use crate::py_solution::PySolution;
 /// polynomial mutation); operator configs are not exposed (NSGA-III owns them privately).
 #[pyclass(name = "NSGAIII")]
 pub struct PyNSGAIII {
-    problem: PyObject,
+    problem: Py<PyAny>,
     population_size: usize,
     divisions: usize,
     execution_mode: ExecutionMode,
@@ -39,7 +39,7 @@ impl PyNSGAIII {
     ///           "multithreaded" is not deterministic even when seeded.
     #[new]
     #[pyo3(signature = (problem, population_size = 0, divisions = 12, execution_mode = "sequential", seed = None))]
-    fn new(problem: PyObject, population_size: usize, divisions: usize, execution_mode: &str, seed: Option<u64>) -> Self {
+    fn new(problem: Py<PyAny>, population_size: usize, divisions: usize, execution_mode: &str, seed: Option<u64>) -> Self {
         let mode = match execution_mode {
             "multithreaded" => ExecutionMode::MultiThreaded,
             "gpu" => ExecutionMode::GPU,
@@ -65,7 +65,7 @@ impl PyNSGAIII {
     ///               Signature: `(archive, population, nfe) -> bool | None`
     ///               Return `False` to stop early. A `Dashboard` works here and is fastest.
     #[pyo3(signature = (max_nfe, callback = None))]
-    fn run(&mut self, py: Python<'_>, max_nfe: usize, callback: Option<PyObject>) -> PyResult<()> {
+    fn run(&mut self, py: Python<'_>, max_nfe: usize, callback: Option<Py<PyAny>>) -> PyResult<()> {
         let store = extract_store(py, &self.problem)?;
         if store.uses_batch_callable {
             crate::py_problem::set_active_batch_problem_id(store.problem_id);
@@ -140,7 +140,7 @@ impl PyNSGAIII {
         } else {
             // Pure-Rust objective: release the GIL for real parallelism.
             let problem = Arc::clone(&store.problem);
-            py.allow_threads(move || {
+            py.detach(move || {
                 let mut ga = NSGAIII::new(problem, pop_size, divisions, mode);
                 if let Some(s) = seed {
                     ga = ga.with_seed(s);
@@ -173,7 +173,7 @@ impl PyNSGAIII {
 
     /// The problem this optimizer was created with.
     #[getter]
-    fn problem(&self, py: Python<'_>) -> PyObject {
+    fn problem(&self, py: Python<'_>) -> Py<PyAny> {
         self.problem.clone_ref(py)
     }
 

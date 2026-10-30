@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 use puggles::core::Solution;
 
 /// Owned solution exposed to Python. No lifetime parameters.
-#[pyclass(name = "Solution")]
+#[pyclass(name = "Solution", skip_from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PySolution {
     #[pyo3(get)]

@@ -69,6 +69,9 @@ them in step.
 
 ### Fixed
 
+- **Security:** the Python bindings move from pyo3 0.25 to 0.29.3, which fixes
+  GHSA-36hh-v3qg-5jq4 (high; out-of-bounds read in `PyList`/`PyTuple` iterators) and
+  GHSA-chgr-c6px-7xpp (moderate; missing `Sync` bound on `PyCFunction::new_closure` closures).
 - Python objectives were called with the callable registry locked. A callable that dropped a
   `Problem` (whose destructor takes the same lock) deadlocked the run.
 

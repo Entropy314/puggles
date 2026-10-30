@@ -40,7 +40,7 @@ fn registered(py: Python<'_>, registry: &Mutex<HashMap<u64, Py<PyAny>>>, id: u64
 /// Looks up the Python callable from the global registry and calls it via the GIL.
 fn python_objective_trampoline(input: &Vec<f64>) -> Vec<f64> {
     let problem_id = ACTIVE_PROBLEM_ID.load(Ordering::Relaxed);
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let callable = registered(py, callable_registry(), problem_id)
             .expect("Python callable not found in registry — was the Problem dropped?");
         let py_list = pyo3::types::PyList::new(py, input).unwrap();
@@ -73,7 +73,7 @@ static ACTIVE_BATCH_PROBLEM_ID: AtomicU64 = AtomicU64::new(0);
 /// The Python function can use multiprocessing / ProcessPoolExecutor internally.
 fn python_batch_objective_trampoline(inputs: &Vec<Vec<f64>>) -> Vec<Vec<f64>> {
     let problem_id = ACTIVE_BATCH_PROBLEM_ID.load(Ordering::Relaxed);
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let callable = registered(py, batch_callable_registry(), problem_id)
             .expect("Python batch callable not found in registry — was the Problem dropped?");
         // Build List[List[float]]
@@ -168,12 +168,12 @@ impl PyProblem {
         py: Python<'_>,
         solution_length: usize,
         number_of_objectives: usize,
-        solution_data_types: Vec<PyObject>,
-        objective_function: Option<PyObject>,
+        solution_data_types: Vec<Py<PyAny>>,
+        objective_function: Option<Py<PyAny>>,
         direction: Option<Vec<i8>>,
         objective_constraints: Option<Vec<Option<f64>>>,
         constraint_operands: Option<Vec<Option<String>>>,
-        batch_objective_function: Option<PyObject>,
+        batch_objective_function: Option<Py<PyAny>>,
         permutation: bool,
     ) -> PyResult<Self> {
         let data_types: Vec<SolutionDataTypes> = parse_data_types(py, solution_data_types)?;

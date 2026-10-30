@@ -98,7 +98,7 @@ impl PyGpuProblem {
         py: Python<'_>,
         solution_length: usize,
         number_of_objectives: usize,
-        solution_data_types: Vec<PyObject>,
+        solution_data_types: Vec<Py<PyAny>>,
         shader_wgsl: &str,
         direction: Option<Vec<i8>>,
     ) -> PyResult<Self> {

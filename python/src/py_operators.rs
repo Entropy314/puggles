@@ -6,7 +6,7 @@ use pyo3::prelude::*;
 /// Available real crossovers: "sbx" (default), "de", "blend", "pcx", "undx"
 /// Available integer/binary crossovers: "uniform" (default), "arithmetic"
 /// `uniform_probability` is the per-gene swap probability (default 0.5).
-#[pyclass(name = "CrossoverConfig")]
+#[pyclass(name = "CrossoverConfig", skip_from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyCrossoverConfig {
     #[pyo3(get, set)]
@@ -79,7 +79,7 @@ impl PyCrossoverConfig {
 ///
 /// Selects which mutation strategy to use for each variable type.
 /// Available: "bitflip" (binary default), "uniform" (int/real default), "polynomial", "gaussian"
-#[pyclass(name = "MutationConfig")]
+#[pyclass(name = "MutationConfig", skip_from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyMutationConfig {
     #[pyo3(get, set)]
