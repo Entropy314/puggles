@@ -91,3 +91,52 @@ def test_without_the_add_on_its_names_explain_how_to_get_it(name):
 def test_without_the_add_on_the_cli_explains_how_to_get_it():
     out = subprocess.run([sys.executable, "-m", "puggles.dashboard", "run.pgrun.json"], capture_output=True, text=True)
     assert out.returncode != 0 and 'pip install "puggles[dashboard]"' in out.stderr
+
+
+# -- features from 0.2.0, kept through the 0.3.0 merge ----------------------------------------
+
+def test_permutation_encoding_keeps_permutations():
+    pos = [0.0, 9.0, 3.0, 7.0, 1.0, 5.0, 8.0, 2.0]
+
+    def tour(x):
+        return [sum(abs(pos[int(a)] - pos[int(b)]) for a, b in zip(x, x[1:]))]
+
+    problem = pg.Problem(8, 1, [pg.Integer(0, 7)] * 8, tour, permutation=True)
+    assert problem.permutation
+    ga = pg.NSGAII(problem, population_size=40, seed=5)
+    ga.run(6000)
+    for s in ga.get_population():
+        assert sorted(int(v) for v in s.variables) == list(range(8))
+
+
+def test_checkpoint_resumes_where_it_left_off(problem):
+    ga = pg.NSGAII(problem, population_size=20, seed=1)
+    ga.run(1_000)
+    state = ga.save_state()
+    resumed = pg.NSGAII(problem, population_size=20, seed=1)
+    resumed.load_state(state)
+    resumed.run(2_000)
+    assert resumed.nfe == 2_000
+
+
+def test_metrics_and_hypervolume_stop(problem):
+    ga = pg.NSGAII(problem, population_size=30, seed=2)
+    generations = ga.run_until_hv_converged(20_000, (11.0, 11.0), patience=10)
+    assert generations > 0 and ga.nfe <= 20_000
+    front = [s.objectives for s in ga.get_archive()]
+    assert ga.archive_hypervolume((11.0, 11.0)) == pytest.approx(pg.hypervolume_2d(front, (11.0, 11.0)))
+    assert pg.spacing(front) >= 0 and pg.igd(front, front) == 0
+
+
+def test_island_model_and_nsga3_batch_objective():
+    problem = pg.create_benchmark_problem("dtlz2", 4, 3, [(0.0, 1.0)] * 4)
+    front = pg.run_island_model(problem, islands=3, population_size=20, max_nfe_per_island=1_000, seed=0)
+    assert front
+
+    def batch(population):
+        return [zdt1(x) for x in population]
+
+    p = pg.Problem(6, 2, [pg.Real(0.0, 1.0)] * 6, batch_objective_function=batch)
+    ga = pg.NSGAIII(p, divisions=6, seed=3)
+    ga.run(600)
+    assert ga.nfe == 600 and ga.get_archive()

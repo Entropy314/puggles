@@ -88,6 +88,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
             direction: Some(vec![-1, -1]),
             solution_data_types: types,
             variable_constraints: None,
+            encoding: puggles::core::Encoding::PerGene,
             eval_fn: EvalFn::Single(heavy_obj),
         })
     }

@@ -1,4 +1,4 @@
-use crate::core::Solution;
+use crate::core::{Encoding, Solution};
 use crate::gatypes::SolutionDataTypes;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,6 +15,24 @@ pub trait Mutation: Send + Sync {
 /// MutationManager to manage and apply mutations
 pub struct MutationManager {
     default_mutations: HashMap<&'static str, Arc<dyn Mutation>>,
+    /// Per-gene swap probability used when the problem uses permutation encoding.
+    permutation_swap_probability: f64,
+}
+
+/// Swap mutation for permutation-encoded solutions: each position may exchange with another
+/// random position. Preserves the permutation, which per-gene mutation cannot — resampling a
+/// single gene duplicates one value and drops another.
+pub fn swap_mutation(solution: &mut [f64], probability: f64, rng: &mut SmallRng) {
+    let n = solution.len();
+    if n < 2 {
+        return;
+    }
+    for i in 0..n {
+        if rng.gen::<f64>() < probability {
+            let j = rng.gen_range(0..n);
+            solution.swap(i, j);
+        }
+    }
 }
 
 impl MutationManager {
@@ -32,7 +50,12 @@ impl MutationManager {
         default_mutations.insert("Real", Arc::clone(&polynomial));
         default_mutations.insert("Integer", polynomial);
 
-        Self { default_mutations }
+        Self { default_mutations, permutation_swap_probability: rate }
+    }
+
+    /// Per-gene swap probability for permutation-encoded problems (defaults to `1/n`).
+    pub fn set_permutation_swap_probability(&mut self, probability: f64) {
+        self.permutation_swap_probability = probability;
     }
 
     pub fn set_default_real_mutation(&mut self, mutation: Arc<dyn Mutation>) {
@@ -54,6 +77,14 @@ impl MutationManager {
     /// [`mutate`](Self::mutate) on a child you already own (e.g. fresh from crossover), with
     /// no extra clone. Bit-identical to `mutate`: each operator reads only its own gene.
     pub fn mutate_owned(&self, mut child: Solution, rng: &mut SmallRng) -> Solution {
+        // Permutation encoding: mutate the whole vector so it stays a permutation.
+        if child.problem.encoding == Encoding::Permutation {
+            swap_mutation(&mut child.solution, self.permutation_swap_probability, rng);
+            child.feasible = false;
+            child.evaluated = false;
+            return child;
+        }
+
         // Resolve the three operators once, not with a map lookup per gene.
         let binary = self.default_mutations.get("BitBinary");
         let real = self.default_mutations.get("Real");
@@ -292,6 +323,7 @@ mod tests {
                 SolutionDataTypes::Real(Real::new(Some(-100.0), Some(1000.0))),
             ],
             variable_constraints: None,
+            encoding: crate::core::Encoding::PerGene,
             eval_fn: EvalFn::Single(|x| vec![x.iter().sum()]),
         }
     }
@@ -303,6 +335,7 @@ mod tests {
             objective_fitness_values: Default::default(),
             constraint_values: Default::default(),
             constraint_violation: 0,
+            constraint_violation_magnitude: 0.0,
             feasible: false,
             evaluated: false,
         }

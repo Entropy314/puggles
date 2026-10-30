@@ -21,7 +21,10 @@ puggles is a Rust implementation of NSGA-II (Non-dominated Sorting Genetic Algor
    - [Custom operators](#7-custom-operators)
    - [Per-generation inspection & early stop](#8-per-generation-inspection--early-stop)
    - [Many objectives with NSGA-III](#9-many-objectives-with-nsga-iii)
-   - [Reproducibility, checkpoints & metrics](#10-reproducibility-checkpoints--metrics)
+   - [Permutation encoding](#10-permutation-encoding)
+   - [Island model](#11-island-model)
+   - [Checkpoint & resume](#12-checkpoint--resume)
+   - [Reproducibility & metrics](#13-reproducibility--metrics)
 5. [Execution Modes](#execution-modes)
 6. [GPU Acceleration](#gpu-acceleration)
 7. [Visualization & Dashboard](#visualization--dashboard)
@@ -364,7 +367,7 @@ ga.run(40_000);
 println!("{} solutions on the front", ga.get_archive().len());
 ```
 
-The API mirrors `NSGAII`: `run`, `run_with`, `get_archive`, `get_nfe`, `with_seed`, `execution_info`, `last_generation_times`. Operators are the crate defaults (SBX + polynomial mutation). NSGA-III evaluates one solution at a time (no batch or GPU objectives).
+The API mirrors `NSGAII`: `run`, `run_with`, `get_archive`, `get_nfe`, `with_seed`, `execution_info`, `effective_mode`, `last_generation_times`, and (feature `gpu`) `with_gpu_evaluator` / `gpu_evaluations`. Batch objectives work too. Operators are the crate defaults (SBX + polynomial mutation).
 
 **Steering.** Between generations, `focus_on(&aspiration, spread)` shrinks the reference grid around target objective values (one per objective, `f64::NAN` = no preference) so the search concentrates there; `spread` in (0, 1] sets how tightly (1 = the whole front). `clear_focus()` returns to the uniform grid:
 
@@ -377,20 +380,108 @@ ga.run_with(60_000, |ga| {
 });
 ```
 
-### 10. Reproducibility, Checkpoints & Metrics
+---
 
-**Seeds.** `with_seed(seed)` on either optimizer seeds the initial population, crossover, mutation and selection; the same seed and problem give a bit-identical run. Use `ExecutionMode::Sequential` with it: multithreaded evaluation interleaves non-deterministically.
+### 10. Permutation Encoding
 
-**Checkpoints.** `save_state()` snapshots the population, archive and NFE as a [`GaState`](src/checkpoint.rs) (serde-serializable — use any format); `load_state(state)` restores it against the same `Problem`, and `run` then resumes from the restored NFE:
+Ordering problems (TSP, scheduling, sequencing) need whole-vector variation: blending or
+resampling a single gene would duplicate one value and drop another. Switch the problem to
+permutation encoding and the GA uses order crossover (OX1) and swap mutation instead.
 
 ```rust
-let state = ga.save_state();
-let json = serde_json::to_string(&state)?; // or bincode, ...
-// ... later, possibly in another process:
-let mut resumed = NSGAII::new(Arc::clone(&problem), 100, ExecutionMode::MultiThreaded);
-resumed.load_state(serde_json::from_str(&json)?);
-resumed.run(50_000);
+use puggles::core::Problem;
+use puggles::gatypes::{Integer, SolutionDataTypes};
+
+const N: usize = 8;
+const POS: [f64; N] = [0.0, 9.0, 3.0, 7.0, 1.0, 5.0, 8.0, 2.0];
+
+// Total travel distance for the visiting order in `x`.
+fn tour_length(x: &Vec<f64>) -> Vec<f64> {
+    vec![x.windows(2).map(|w| (POS[w[0] as usize] - POS[w[1] as usize]).abs()).sum()]
+}
+
+let problem = Arc::new(
+    Problem::new(
+        N, 1, None, None, Some(vec![-1]),
+        (0..N).map(|_| SolutionDataTypes::Integer(Integer::new(Some(0), Some(N as i64 - 1)))).collect(),
+        tour_length,
+    )
+    .with_permutation_encoding(),
+);
+
+let mut ga = NSGAII::new(problem, 40, ExecutionMode::Sequential).with_seed(5);
+ga.run(6_000);
+// Every solution is a valid permutation of 0..N.
 ```
+
+Under this encoding `solution_data_types` is ignored for generation — the value space is fixed
+by the permutation itself. Supply entries anyway so `solution_length` matches.
+
+Customise the operator with `crossover_manager.set_permutation_crossover(...)` and the swap rate
+with `mutation_manager.set_permutation_swap_probability(...)`.
+
+---
+
+### 11. Island Model
+
+One large population can collapse onto a single region of the front. Several smaller
+populations, explored independently and pooled at the end, trade per-island depth for coverage.
+Islands are embarrassingly parallel, so they run under Rayon with no coordination.
+
+```rust
+use puggles::islands::{run_islands, IslandConfig};
+
+let front = run_islands(
+    Arc::clone(&problem),
+    IslandConfig {
+        islands: 8,
+        population_size: 50,
+        max_nfe_per_island: 10_000,
+        seed: Some(0),
+        ..Default::default()
+    },
+);
+```
+
+Island `i` is seeded with `seed + i`: the islands differ from each other, and the whole run still
+reproduces exactly for a given base seed. `execution_mode` applies *within* each island and
+defaults to `Sequential`, since the islands already supply the parallelism.
+
+The return value is the non-dominated set of the pooled archives. `merge_fronts` does that
+pooling on its own if you run the GAs yourself.
+
+---
+
+### 12. Checkpoint & Resume
+
+`GaState` holds only evolved data — decision variables and evaluation results — because a
+`Problem` carries a function pointer that cannot be serialized. Rebuild the same `Problem` on
+resume and the state rehydrates against it.
+
+```rust
+let json = serde_json::to_string(&ga.save_state())?;
+std::fs::write("run.json", &json)?;
+
+// ... later, against an identically-built Problem ...
+let mut ga = NSGAII::new(Arc::clone(&problem), 100, ExecutionMode::MultiThreaded);
+ga.load_state(serde_json::from_str(&std::fs::read_to_string("run.json")?)?);
+ga.run(200_000); // cumulative budget — already-spent evaluations are not repeated
+```
+
+From Python the same thing is a JSON string:
+
+```python
+state = ga.save_state()
+ga2 = puggles.NSGAII(problem, population_size=100, seed=1)
+ga2.load_state(state)
+ga2.run(200_000)
+```
+
+---
+
+### 13. Reproducibility & Metrics
+
+**Seeds.** `with_seed(seed)` on either optimizer seeds the initial population, crossover, mutation and selection; the same seed and problem give a bit-identical run, and observing it with `run_with` doesn't change it. Use `ExecutionMode::Sequential` with it: multithreaded evaluation interleaves non-deterministically. To pause and resume, see [§12](#12-checkpoint--resume).
 
 **Metrics.** [`puggles::metrics`](src/metrics.rs) scores minimization fronts given as objective vectors (`metrics::objective_vectors(ga.get_archive())`):
 
@@ -399,6 +490,8 @@ resumed.run(50_000);
 | `igd(front, reference_set)` | Inverted generational distance to a known front; lower is better |
 | `hypervolume_2d(front, [r1, r2])` | Area dominated by a 2-objective front up to a reference point; higher is better |
 | `spacing(front)` | How evenly the front is spread; lower is more even |
+
+`NSGAII::archive_hypervolume(reference)` reports the current archive's hypervolume, and `run_until_hv_converged(max_nfe, patience, epsilon, reference)` stops once it plateaus — diversity-aware, unlike `run_until_converged`'s per-objective bests.
 
 ---
 
@@ -603,7 +696,8 @@ let cd: Vec<f64> = crowding_distance(&population, &fronts[0]);
 
 ### `Problem`
 
-Construct with `Problem::new(...)` (single objective fn) or a struct literal (needed for `EvalFn::Batch`).
+Construct with `Problem::new(...)` (panics on invalid config), `Problem::try_new(...)`
+(returns `Result<Problem, ConfigError>`), or a struct literal (needed for `EvalFn::Batch`).
 
 | Field / param | Type | Description |
 |---|---|---|
@@ -614,6 +708,8 @@ Construct with `Problem::new(...)` (single objective fn) or a struct literal (ne
 | `direction` | `Option<Vec<i8>>` | `-1` = minimize, `1` = maximize (default: all `-1`) |
 | `solution_data_types` | `Vec<SolutionDataTypes>` | One `Real`/`Integer`/`BitBinary` per variable |
 | `eval_fn` | `EvalFn` | `Single(fn(&Vec<f64>) -> Vec<f64>)` or `Batch(fn(&Vec<Vec<f64>>) -> Vec<Vec<f64>>)` |
+| `variable_constraints` | `Option<Vec<fn(&Vec<f64>) -> f64>>` | Decision-variable constraints `g(x) <= 0` |
+| `encoding` | `Encoding` | `PerGene` (default) or `Permutation` |
 
 ### `Solution`
 
@@ -624,6 +720,7 @@ Construct with `Problem::new(...)` (single objective fn) or a struct literal (ne
 | `constraint_values` | `ObjVec` | `1.0` = satisfied, `0.0` = violated, per constraint |
 | `feasible` | `bool` | `true` if all constraints satisfied |
 | `constraint_violation` | `usize` | Count of violated constraints |
+| `constraint_violation_magnitude` | `f64` | Total violation distance; breaks ties between equally-infeasible solutions |
 | `evaluated` | `bool` | `true` once the objective has been computed |
 | `problem` | `Arc<Problem>` | The problem it belongs to |
 
@@ -642,6 +739,8 @@ Construct with `Problem::new(...)` (single objective fn) or a struct literal (ne
 | `run_with(max_nfe, \|ga\| -> bool)` | `()` | `run`, calling the closure after each generation; `false` stops |
 | `run_timed(max_nfe, Duration)` | `()` | Stop at the NFE budget or time limit, whichever first |
 | `run_until_converged(max_nfe, patience, epsilon)` | `usize` | Stop once the per-objective bests plateau; returns generations run |
+| `run_until_hv_converged(max_nfe, patience, epsilon, ref)` | `usize` | Stop on a hypervolume plateau (2 objectives) |
+| `archive_hypervolume([f64; 2])` | `f64` | Hypervolume of the current archive |
 | `update_archive()` | `()` | Fold the current non-dominated feasible set into the archive |
 | `get_archive()` | `&[Solution]` | Pareto archive |
 | `take_archive()` | `Vec<Solution>` | Move the archive out (leaves it empty) |
@@ -650,14 +749,14 @@ Construct with `Problem::new(...)` (single objective fn) or a struct literal (ne
 | `execution_info()` | `ExecutionInfo` | Requested vs effective mode, CPU threads, GPU device, and why they differ |
 | `gpu_evaluations()` | `Option<usize>` | Solutions evaluated on the GPU so far, if an evaluator is attached |
 | `last_generation_times()` | `GenerationTimes` | Seconds the last generation spent in variation, evaluation, selection and archive update |
-| `save_state()` / `load_state(GaState)` | `GaState` / `()` | Checkpoint and resume ([§10](#10-reproducibility-checkpoints--metrics)) |
+| `save_state()` / `load_state(GaState)` | `GaState` / `()` | Checkpoint and resume ([§12](#12-checkpoint--resume)) |
 | `with_gpu_evaluator(GpuEvaluator)` | `Self` | (feature `gpu`) attach a GPU evaluator; builder-style |
 
 Public fields worth knowing: `population: Vec<Solution>`, `archive: Vec<Solution>`, `crossover_manager`, `mutation_manager`, `execution_mode`.
 
 ### `NSGAIII`
 
-`NSGAIII::new(problem: Arc<Problem>, population_size: usize /* 0 = derived */, divisions: usize, execution_mode: ExecutionMode)`. Methods: `with_seed`, `run`, `run_with`, `get_archive`, `take_archive`, `get_nfe`, `reference_points`, `focus_on`, `clear_focus`, `execution_info`, `last_generation_times` — see [§9](#9-many-objectives-with-nsga-iii).
+`NSGAIII::new(problem: Arc<Problem>, population_size: usize /* 0 = derived */, divisions: usize, execution_mode: ExecutionMode)`. Methods: `with_seed`, `run`, `run_with`, `get_archive`, `take_archive`, `get_nfe`, `reference_points`, `focus_on`, `clear_focus`, `execution_info`, `effective_mode`, `gpu_evaluations`, `with_gpu_evaluator` (feature `gpu`), `last_generation_times` — see [§9](#9-many-objectives-with-nsga-iii).
 
 ---
 
@@ -666,5 +765,7 @@ Public fields worth knowing: `population: Vec<Solution>`, `archive: Vec<Solution
 - **NFE budget:** a common starting point is `population_size × 100` (≈100 generations). Hard multi-objective problems may need 1000+ generations.
 - **Population size:** 50–200 is typical. Larger populations cover the Pareto front better but cost more per generation.
 - **Execution mode:** use `MultiThreaded` (the default) for cheap-to-evaluate objectives to get free CPU parallelism; `Sequential` for tiny problems or when debugging; `GPU` only with the feature enabled and an evaluator attached.
-- **Constraints** need no normalization — constraint-based dominance only compares violation counts.
+- **Constraints** are compared by violation count first, then by total violation magnitude. Magnitude only breaks ties between solutions with the same number of broken constraints, so constraints on wildly different scales are still worth normalizing if you rely on that tiebreak.
+- **Bounds are closed:** `[lower, upper]` everywhere — generation, crossover, and mutation.
+- **Ordering problems** need `with_permutation_encoding()`; per-gene operators cannot keep a permutation valid.
 - **Archive vs. population:** the archive is the running Pareto front accumulated across iterations; the population is the current generation. For the final answer, use `get_archive()`.

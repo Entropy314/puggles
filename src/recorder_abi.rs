@@ -186,7 +186,7 @@ impl<'a> Snapshot<'a> {
             nfe: ga.get_nfe(),
             algorithm: "NSGAIII",
             execution: Some(ga.execution_info()),
-            gpu_evaluations: None,
+            gpu_evaluations: ga.gpu_evaluations(),
             times: Some(ga.last_generation_times()),
         }
     }

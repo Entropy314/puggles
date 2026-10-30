@@ -46,26 +46,31 @@ pub(crate) type GpuEval = Option<std::sync::Arc<puggles::gpu_evaluator::GpuEvalu
 #[cfg(not(feature = "gpu"))]
 pub(crate) type GpuEval = Option<std::convert::Infallible>;
 
-/// Record a generation without waiting out a pause. A GpuProblem evaluates through a batch
-/// objective, which the optimizer itself reports as CPU work; report its shader's device and
-/// evaluation count instead.
-pub(crate) fn record_without_hold(rec: &RecorderHandle, ga: &NSGAII, gpu: &GpuEval) {
-    #[allow(unused_mut)]
-    let mut snap = Snapshot::of_nsgaii(ga);
+/// A GpuProblem evaluates through a batch objective, which the optimizer itself reports as CPU
+/// work; report its shader's device and evaluation count instead.
+pub(crate) fn gpu_snapshot<'a>(snap: Snapshot<'a>, gpu: &GpuEval) -> Snapshot<'a> {
     #[cfg(feature = "gpu")]
     if let Some(gpu) = gpu {
         use puggles::genetic_algorithms_v2::{ExecutionInfo, ExecutionMode};
-        snap.execution = Some(ExecutionInfo {
-            requested: ExecutionMode::GPU,
-            effective: ExecutionMode::GPU,
-            cpu_threads: None,
-            device: Some(gpu.device_description()),
-            note: Some("GpuProblem: the shader evaluates each generation as one batch".into()),
-        });
-        snap.gpu_evaluations = Some(gpu.evaluated_count());
+        return Snapshot {
+            execution: Some(ExecutionInfo {
+                requested: ExecutionMode::GPU,
+                effective: ExecutionMode::GPU,
+                cpu_threads: None,
+                device: Some(gpu.device_description()),
+                note: Some("GpuProblem: the shader evaluates each generation as one batch".into()),
+            }),
+            gpu_evaluations: Some(gpu.evaluated_count()),
+            ..snap
+        };
     }
     let _ = gpu;
-    rec.record(&snap);
+    snap
+}
+
+/// Record a generation without waiting out a pause.
+pub(crate) fn record_without_hold(rec: &RecorderHandle, ga: &NSGAII, gpu: &GpuEval) {
+    rec.record(&gpu_snapshot(Snapshot::of_nsgaii(ga), gpu));
 }
 
 /// Record with the GIL released (pure-Rust objectives): a pause just blocks this thread.

@@ -200,8 +200,10 @@ def test_gpu_problem_is_reported_as_gpu():
     assert meta["execution"]["device"]
     assert last["gpu_evals"] == last["nfe"] == ga.nfe
 
-    with pytest.raises(ValueError, match="GpuProblem"):
-        pg.NSGAIII(problem, divisions=4).run(100)
+    ga3 = pg.NSGAIII(problem, population_size=20, divisions=4, execution_mode="gpu", seed=8)
+    with pg.Dashboard(ga3, open_browser=False) as dash:
+        ga3.run(400, callback=dash)
+        assert get_json(dash, "api/meta")["execution"]["effective"] == "GPU"
 
 
 def test_pause_and_resume_over_http(problem):
@@ -382,7 +384,7 @@ def test_run_records_natively_without_python_calls(problem, algorithm):
 
 
 def test_pure_rust_objective_records_with_the_gil_released():
-    problem = pg.create_benchmark_problem("dtlz2", 7, 3, [(0.0, 1.0)] * 7)
+    problem = pg.create_benchmark_problem("dtlz2", 4, 3, [(0.0, 1.0)] * 4)
     ga = pg.NSGAII(problem, population_size=40, seed=2, execution_mode="multithreaded")
     ticks = []
     stop = threading.Event()

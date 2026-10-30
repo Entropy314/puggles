@@ -1,10 +1,19 @@
 # NSGA-II Optimization Roadmap
 
-> **Status (2026-08-27):** Quick wins + **Tier A (ENS-SS)** + **B2 (crossover clones)** + **B4
-> (archive clones)** are **implemented** (66 tests pass, quality preserved; single-obj 55→15 ms,
-> ZDT1 27→20 ms, DTLZ2 71→56 ms — see `sandbox/benchmarks.md` §5). **Deferred:** B1 (SmallVec —
-> high churn: 59 sites/7 files + checkpoint serde), B3 (offspring-buffer reuse — negligible), and
-> all of Tier C. The sections below are the original design; items above are done.
+> **Status (2026-10-30, 0.3.0):** Done:
+>
+> - quick wins
+> - **Tier A**: ENS-SS, plus Best-Order-Sort for N ≥ 200
+> - **B1**: `ObjVec` = `SmallVec<[f64; 4]>`
+> - **B2**: crossover clones
+> - **B4** (partial): front-0-only archive candidates, survivors moved instead of cloned, and
+>   in-place genome de-duplication
+>
+> 0.3.0 also cut per-generation clones in mutation, crossover and batch evaluation (NSGA-II
+> seeded output is bit-identical). NSGA-III now reuses survival ranks, sorting once per
+> generation instead of two or three times. The archive is still rebuilt each generation, not
+> maintained incrementally (the rest of B4). **Open:** B3 (buffer reuse), C2 (parallel sort),
+> C3 (O(N) crowding for M = 2). The sections below are the original design.
 
 ## Context
 

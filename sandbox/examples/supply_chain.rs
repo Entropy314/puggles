@@ -100,6 +100,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         direction: Some(vec![-1, -1]),
         solution_data_types: types,
         variable_constraints: None,
+        encoding: puggles::core::Encoding::PerGene,
         eval_fn: EvalFn::Single(supply_chain_objective),
     });
 

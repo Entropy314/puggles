@@ -24,6 +24,7 @@ class Solution:
     evaluated: bool
     feasible: bool
     constraint_violation: int
+    constraint_violation_magnitude: float
 
 # callback(archive, population, nfe) -> False to stop early. A dashboard from the optional
 # add-on (`pip install "puggles[dashboard]"`) works here too: it offers a native recorder through
@@ -37,6 +38,8 @@ class Problem:
     """Per objective: -1 = minimize, 1 = maximize."""
     variable_types: List[Tuple[str, Optional[float], Optional[float]]]
     """Per variable: (kind, lower_bound, upper_bound); kind is "real", "integer" or "binary"."""
+    permutation: bool
+    """True when the problem uses permutation encoding (``permutation=True``)."""
     def __init__(
         self,
         solution_length: int,
@@ -49,6 +52,7 @@ class Problem:
         batch_objective_function: Optional[
             Callable[[List[List[float]]], List[List[float]]]
         ] = None,
+        permutation: bool = False,
     ) -> None: ...
 
 class GpuProblem:
@@ -100,15 +104,45 @@ class NSGAII:
         """Called as callback(archive, population, nfe) after each generation; return False to stop."""
     def get_archive(self) -> List[Solution]: ...
     def get_population(self) -> List[Solution]: ...
+    def archive_hypervolume(self, reference: Tuple[float, float]) -> float:
+        """Hypervolume of the last run's archive against a nadir reference point.
+
+        Computed in minimization space (maximized objectives are negated). 2 objectives only.
+        """
+        ...
+    def save_state(self) -> str:
+        """Serialize the last run (population, archive, nfe) to a JSON string.
+
+        The objective function is not stored. To resume: rebuild the same Problem,
+        call load_state(), then run() with the cumulative budget.
+        Raises RuntimeError if called before the first run().
+        """
+        ...
+    def load_state(self, state: str) -> None:
+        """Restore a checkpoint from save_state(); applied on the next run()."""
+        ...
+    def run_until_hv_converged(
+        self,
+        max_nfe: int,
+        reference: Tuple[float, float],
+        patience: int = 20,
+        epsilon: float = 1e-6,
+    ) -> int:
+        """Run until the budget is spent or archive hypervolume plateaus. 2 objectives only.
+
+        Diversity-aware alternative to a fixed budget: hypervolume responds to the front
+        filling in, not just extending. Returns the number of generations run.
+        """
+        ...
 
 class NSGAIII:
     """Reference-point many-objective GA. Prefer over NSGAII for 3+ objectives.
-    Does not support a batch objective or a GpuProblem (use NSGAII for those)."""
+    Supports batch objectives and a GpuProblem (gpu builds)."""
     nfe: int
-    problem: Problem
+    problem: Union[Problem, GpuProblem]
     def __init__(
         self,
-        problem: Problem,
+        problem: Union[Problem, GpuProblem],
         population_size: int = 0,
         divisions: int = 12,
         execution_mode: str = "sequential",
@@ -179,3 +213,39 @@ def create_benchmark_problem(
     bounds: List[tuple],
     direction: Optional[List[int]] = None,
 ) -> Problem: ...
+
+
+# ---------------------------------------------------------------------------
+# Front-quality metrics. All assume MINIMIZATION — negate maximized objectives.
+# ---------------------------------------------------------------------------
+
+def hypervolume_2d(front: List[List[float]], reference: Tuple[float, float]) -> float:
+    """Exact 2-objective hypervolume (dominated area) against a nadir reference point."""
+    ...
+
+def igd(front: List[List[float]], reference_set: List[List[float]]) -> float:
+    """Inverted generational distance to a reference set. Lower is better."""
+    ...
+
+def spacing(front: List[List[float]]) -> float:
+    """Schott spacing: std-dev of nearest-neighbour distances. Lower is more uniform."""
+    ...
+
+
+# ---------------------------------------------------------------------------
+# Island-model parallelism
+# ---------------------------------------------------------------------------
+
+def run_island_model(
+    problem: Problem,
+    islands: int = 4,
+    population_size: int = 50,
+    max_nfe_per_island: int = 10_000,
+    seed: Optional[int] = None,
+) -> List[Solution]:
+    """Run independent populations in parallel; return the merged Pareto front.
+
+    Requires a native Rust objective (create_benchmark_problem). A Python callable is
+    rejected because the GIL would serialize the islands.
+    """
+    ...

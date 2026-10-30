@@ -162,6 +162,7 @@ impl PyProblem {
         objective_constraints = None,
         constraint_operands = None,
         batch_objective_function = None,
+        permutation = false,
     ))]
     fn new(
         py: Python<'_>,
@@ -173,6 +174,7 @@ impl PyProblem {
         objective_constraints: Option<Vec<Option<f64>>>,
         constraint_operands: Option<Vec<Option<String>>>,
         batch_objective_function: Option<PyObject>,
+        permutation: bool,
     ) -> PyResult<Self> {
         let data_types: Vec<SolutionDataTypes> = parse_data_types(py, solution_data_types)?;
         let problem_id = PROBLEM_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -187,7 +189,7 @@ impl PyProblem {
 
             fn placeholder(_: &Vec<f64>) -> Vec<f64> { Vec::new() }
 
-            let mut problem = Problem::new(
+            let mut problem = Problem::try_new(
                 solution_length,
                 number_of_objectives,
                 objective_constraints,
@@ -195,8 +197,12 @@ impl PyProblem {
                 direction,
                 data_types,
                 placeholder,
-            );
+            )
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
             problem.eval_fn = EvalFn::Batch(python_batch_objective_trampoline);
+            if permutation {
+                problem = problem.with_permutation_encoding();
+            }
 
             return Ok(PyProblem {
                 store: ProblemStore {
@@ -219,7 +225,7 @@ impl PyProblem {
             .unwrap_or_else(|e| e.into_inner())
             .insert(problem_id, obj_fn.into_pyobject(py).unwrap().into());
 
-        let problem = Problem::new(
+        let mut problem = Problem::try_new(
             solution_length,
             number_of_objectives,
             objective_constraints,
@@ -227,7 +233,11 @@ impl PyProblem {
             direction,
             data_types,
             python_objective_trampoline,
-        );
+        )
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        if permutation {
+            problem = problem.with_permutation_encoding();
+        }
 
         Ok(PyProblem {
             store: ProblemStore {
@@ -259,6 +269,12 @@ impl PyProblem {
     #[getter]
     fn variable_types(&self) -> Vec<VariableType> {
         variable_types_of(&self.store.problem)
+    }
+
+    /// True when this problem uses permutation encoding.
+    #[getter]
+    fn permutation(&self) -> bool {
+        self.store.problem.encoding == puggles::core::Encoding::Permutation
     }
 
     fn __repr__(&self) -> String {
@@ -301,15 +317,17 @@ pub fn create_problem_from_fn(
     let problem_id = PROBLEM_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
     PyProblem {
         store: ProblemStore {
-            problem: Arc::new(Problem::new(
-                solution_length,
-                number_of_objectives,
-                None,
-                None,
-                direction,
-                data_types,
-                objective_function,
-            )),
+            problem: Arc::new(
+                Problem::new(
+                    solution_length,
+                    number_of_objectives,
+                    None,
+                    None,
+                    direction,
+                    data_types,
+                    objective_function,
+                ),
+            ),
             problem_id,
             uses_python_callable: false,
             uses_batch_callable: false,

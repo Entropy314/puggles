@@ -71,15 +71,15 @@ pub fn parse_data_types(py: Python<'_>, types: Vec<PyObject>) -> PyResult<Vec<So
         .into_iter()
         .map(|obj| {
             if let Ok(r) = obj.extract::<PyReal>(py) {
-                Ok(SolutionDataTypes::Real(Real::new(
-                    Some(r.lower_bound),
-                    Some(r.upper_bound),
-                )))
+                // try_new, not new: invalid bounds become a Python ValueError instead of a
+                // Rust panic unwinding across the FFI boundary.
+                Real::try_new(Some(r.lower_bound), Some(r.upper_bound))
+                    .map(SolutionDataTypes::Real)
+                    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
             } else if let Ok(i) = obj.extract::<PyInteger>(py) {
-                Ok(SolutionDataTypes::Integer(Integer::new(
-                    Some(i.lower_bound),
-                    Some(i.upper_bound),
-                )))
+                Integer::try_new(Some(i.lower_bound), Some(i.upper_bound))
+                    .map(SolutionDataTypes::Integer)
+                    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
             } else if obj.extract::<PyBitBinary>(py).is_ok() {
                 Ok(SolutionDataTypes::BitBinary(BitBinary::new()))
             } else {

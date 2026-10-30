@@ -15,10 +15,33 @@ impl Dominance for ParetoDominance {
         let problem: &Problem = &solution_1.problem;
         let n_objectives = problem.number_of_objectives;
 
-        // Constraint-based dominance: fewer violations wins. Gated on `has_constraints()` so
-        // decision-variable constraints count too — they feed the same `constraint_violation`.
-        if problem.has_constraints() && solution_1.constraint_violation != solution_2.constraint_violation {
-            return if solution_1.constraint_violation < solution_2.constraint_violation { -1 } else { 1 };
+        // Constraint-based dominance (Deb 2002 constrained-domination). Gated on
+        // `has_constraints()` so decision-variable constraints count too — they feed the same
+        // `constraint_violation`.
+        //
+        //   1. fewer violated constraints wins (feasible therefore beats infeasible);
+        //   2. equally infeasible → the smaller *total violation magnitude* wins. A bare count
+        //      cannot separate "1 metre outside" from "1000 metres outside", and falling
+        //      through to objective comparison here ranks infeasible solutions on objectives
+        //      that are not yet meaningful;
+        //   3. otherwise → ordinary Pareto comparison on the objectives.
+        if problem.has_constraints() {
+            if solution_1.constraint_violation != solution_2.constraint_violation {
+                return if solution_1.constraint_violation < solution_2.constraint_violation { -1 } else { 1 };
+            }
+            if solution_1.constraint_violation > 0 {
+                let (m1, m2) = (
+                    solution_1.constraint_violation_magnitude,
+                    solution_2.constraint_violation_magnitude,
+                );
+                // Strict comparison only; equal magnitudes fall through to the objectives.
+                if m1 < m2 {
+                    return -1;
+                }
+                if m2 < m1 {
+                    return 1;
+                }
+            }
         }
 
         let mut is_solution_1_better = false;
@@ -71,18 +94,27 @@ fn single_objective_fronts(population: &[Solution]) -> Vec<Vec<usize>> {
     // direction is None it does not negate (treats it as maximize). Mirror that exactly.
     let minimize = problem.direction.as_ref().map_or(false, |d| d[0] == -1);
 
-    // Sort key: smaller `primary` (fewer violations) is better; higher `adj` is better.
-    let key = |i: usize| -> (usize, f64) {
+    // Sort key: smaller `primary` (fewer violations) is better, then smaller violation
+    // magnitude among equally-infeasible solutions, then higher `adj`. Mirrors the three
+    // tiers of `ParetoDominance` exactly so this fast path yields identical fronts.
+    let key = |i: usize| -> (usize, f64, f64) {
         let primary = if use_constraints { population[i].constraint_violation } else { 0 };
+        // Magnitude only separates solutions that are both infeasible.
+        let magnitude = if use_constraints && primary > 0 {
+            population[i].constraint_violation_magnitude
+        } else {
+            0.0
+        };
         let obj = population[i].objective_fitness_values[0];
-        (primary, if minimize { -obj } else { obj })
+        (primary, magnitude, if minimize { -obj } else { obj })
     };
 
     let mut order: Vec<usize> = (0..population.len()).collect();
     order.sort_by(|&a, &b| {
-        let (pa, aa) = key(a);
-        let (pb, ab) = key(b);
+        let (pa, ma, aa) = key(a);
+        let (pb, mb, ab) = key(b);
         pa.cmp(&pb)
+            .then(ma.partial_cmp(&mb).unwrap_or(std::cmp::Ordering::Equal)) // magnitude ascending
             .then(ab.partial_cmp(&aa).unwrap_or(std::cmp::Ordering::Equal)) // adj descending
             .then(a.cmp(&b)) // deterministic tie-break by index
     });
@@ -91,7 +123,7 @@ fn single_objective_fronts(population: &[Solution]) -> Vec<Vec<usize>> {
     // dominates → an earlier front. Same exact-f64 tie handling as the general path.
     let mut fronts: Vec<Vec<usize>> = Vec::new();
     let mut current: Vec<usize> = Vec::new();
-    let mut prev: Option<(usize, f64)> = None;
+    let mut prev: Option<(usize, f64, f64)> = None;
     for &i in &order {
         let k = key(i);
         if prev.map_or(false, |p| p == k) {
@@ -160,14 +192,23 @@ fn ens_ss_fronts<D: Dominance + ?Sized>(population: &[Solution], dominance: &D) 
             0
         }
     };
+    // Violation magnitude, which only separates solutions that are both infeasible.
+    let magnitude = |i: usize| -> f64 {
+        if use_constraints && population[i].constraint_violation > 0 {
+            population[i].constraint_violation_magnitude
+        } else {
+            0.0
+        }
+    };
 
-    // Best-first order: fewer constraint violations, then adjusted objectives descending
-    // (lexicographic), then index. Guarantees a solution can only be dominated by one sorted
-    // before it — the invariant ENS relies on.
+    // Best-first order: fewer constraint violations, then smaller violation magnitude, then
+    // adjusted objectives descending (lexicographic), then index. Guarantees a solution can
+    // only be dominated by one sorted before it — the invariant ENS relies on.
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&a, &b| {
         primary(a)
             .cmp(&primary(b))
+            .then_with(|| magnitude(a).partial_cmp(&magnitude(b)).unwrap_or(std::cmp::Ordering::Equal))
             .then_with(|| {
                 for m in 0..n_obj {
                     let aa = population[a].objective_fitness_values[m] * signs[m];
@@ -364,6 +405,7 @@ mod tests {
                 SolutionDataTypes::Real(Real::new(Some(0.), Some(100.))),
             ],
             variable_constraints: None,
+            encoding: crate::core::Encoding::PerGene,
             eval_fn: EvalFn::Single(parabloid_5),
         });
 
@@ -373,6 +415,7 @@ mod tests {
             objective_fitness_values: smallvec![],
             constraint_values: smallvec![],
             constraint_violation: 0,
+            constraint_violation_magnitude: 0.0,
             feasible: false,
             evaluated: false,
         };
@@ -382,6 +425,7 @@ mod tests {
             objective_fitness_values: smallvec![],
             constraint_values: smallvec![],
             constraint_violation: 0,
+            constraint_violation_magnitude: 0.0,
             feasible: false,
             evaluated: false,
         };
@@ -409,6 +453,7 @@ mod tests {
                 SolutionDataTypes::Real(Real::new(Some(0.), Some(100.))),
             ],
             variable_constraints: None,
+            encoding: crate::core::Encoding::PerGene,
             eval_fn: EvalFn::Single(parabloid_5),
         });
 
@@ -418,6 +463,7 @@ mod tests {
             objective_fitness_values: smallvec![],
             constraint_values: smallvec![],
             constraint_violation: 0,
+            constraint_violation_magnitude: 0.0,
             feasible: false,
             evaluated: false,
         };
@@ -427,6 +473,7 @@ mod tests {
             objective_fitness_values: smallvec![],
             constraint_values: smallvec![],
             constraint_violation: 0,
+            constraint_violation_magnitude: 0.0,
             feasible: false,
             evaluated: false,
         };
@@ -451,6 +498,7 @@ mod tests {
                 SolutionDataTypes::Real(Real::new(Some(0.), Some(100.))),
             ],
             variable_constraints: None,
+            encoding: crate::core::Encoding::PerGene,
             eval_fn: EvalFn::Single(|x| vec![x[0], x[1]]),
         });
 
@@ -461,6 +509,7 @@ mod tests {
             objective_fitness_values: smallvec![1.0, 10.0],
             constraint_values: smallvec![],
             constraint_violation: 0,
+            constraint_violation_magnitude: 0.0,
             feasible: true,
             evaluated: true,
         };
@@ -470,6 +519,7 @@ mod tests {
             objective_fitness_values: smallvec![10.0, 1.0],
             constraint_values: smallvec![],
             constraint_violation: 0,
+            constraint_violation_magnitude: 0.0,
             feasible: true,
             evaluated: true,
         };
@@ -491,19 +541,20 @@ mod tests {
                 SolutionDataTypes::Real(Real::new(Some(0.), Some(100.))),
             ],
             variable_constraints: None,
+            encoding: crate::core::Encoding::PerGene,
             eval_fn: EvalFn::Single(|x| vec![x[0], x[1]]),
         });
 
         let population = vec![
             // Front 0: Pareto-optimal
-            Solution { problem: Arc::clone(&problem), solution: vec![1.0, 5.0], objective_fitness_values: smallvec![1.0, 5.0], constraint_values: smallvec![], constraint_violation: 0, feasible: true, evaluated: true },
-            Solution { problem: Arc::clone(&problem), solution: vec![5.0, 1.0], objective_fitness_values: smallvec![5.0, 1.0], constraint_values: smallvec![], constraint_violation: 0, feasible: true, evaluated: true },
+            Solution { problem: Arc::clone(&problem), solution: vec![1.0, 5.0], objective_fitness_values: smallvec![1.0, 5.0], constraint_values: smallvec![], constraint_violation: 0, constraint_violation_magnitude: 0.0, feasible: true, evaluated: true },
+            Solution { problem: Arc::clone(&problem), solution: vec![5.0, 1.0], objective_fitness_values: smallvec![5.0, 1.0], constraint_values: smallvec![], constraint_violation: 0, constraint_violation_magnitude: 0.0, feasible: true, evaluated: true },
             // Front 1: dominated by front 0
-            Solution { problem: Arc::clone(&problem), solution: vec![3.0, 6.0], objective_fitness_values: smallvec![3.0, 6.0], constraint_values: smallvec![], constraint_violation: 0, feasible: true, evaluated: true },
+            Solution { problem: Arc::clone(&problem), solution: vec![3.0, 6.0], objective_fitness_values: smallvec![3.0, 6.0], constraint_values: smallvec![], constraint_violation: 0, constraint_violation_magnitude: 0.0, feasible: true, evaluated: true },
             // Front 1: dominated by front 0
-            Solution { problem: Arc::clone(&problem), solution: vec![6.0, 3.0], objective_fitness_values: smallvec![6.0, 3.0], constraint_values: smallvec![], constraint_violation: 0, feasible: true, evaluated: true },
+            Solution { problem: Arc::clone(&problem), solution: vec![6.0, 3.0], objective_fitness_values: smallvec![6.0, 3.0], constraint_values: smallvec![], constraint_violation: 0, constraint_violation_magnitude: 0.0, feasible: true, evaluated: true },
             // Front 2: dominated by front 1
-            Solution { problem: Arc::clone(&problem), solution: vec![10.0, 10.0], objective_fitness_values: smallvec![10.0, 10.0], constraint_values: smallvec![], constraint_violation: 0, feasible: true, evaluated: true },
+            Solution { problem: Arc::clone(&problem), solution: vec![10.0, 10.0], objective_fitness_values: smallvec![10.0, 10.0], constraint_values: smallvec![], constraint_violation: 0, constraint_violation_magnitude: 0.0, feasible: true, evaluated: true },
         ];
 
         let fronts = fast_non_dominated_sort(&population, &ParetoDominance);
@@ -527,13 +578,14 @@ mod tests {
                 SolutionDataTypes::Real(Real::new(Some(0.), Some(100.))),
             ],
             variable_constraints: None,
+            encoding: crate::core::Encoding::PerGene,
             eval_fn: EvalFn::Single(|x| vec![x[0], x[1]]),
         });
 
         let population = vec![
-            Solution { problem: Arc::clone(&problem), solution: vec![1.0, 5.0], objective_fitness_values: smallvec![1.0, 5.0], constraint_values: smallvec![], constraint_violation: 0, feasible: true, evaluated: true },
-            Solution { problem: Arc::clone(&problem), solution: vec![3.0, 3.0], objective_fitness_values: smallvec![3.0, 3.0], constraint_values: smallvec![], constraint_violation: 0, feasible: true, evaluated: true },
-            Solution { problem: Arc::clone(&problem), solution: vec![5.0, 1.0], objective_fitness_values: smallvec![5.0, 1.0], constraint_values: smallvec![], constraint_violation: 0, feasible: true, evaluated: true },
+            Solution { problem: Arc::clone(&problem), solution: vec![1.0, 5.0], objective_fitness_values: smallvec![1.0, 5.0], constraint_values: smallvec![], constraint_violation: 0, constraint_violation_magnitude: 0.0, feasible: true, evaluated: true },
+            Solution { problem: Arc::clone(&problem), solution: vec![3.0, 3.0], objective_fitness_values: smallvec![3.0, 3.0], constraint_values: smallvec![], constraint_violation: 0, constraint_violation_magnitude: 0.0, feasible: true, evaluated: true },
+            Solution { problem: Arc::clone(&problem), solution: vec![5.0, 1.0], objective_fitness_values: smallvec![5.0, 1.0], constraint_values: smallvec![], constraint_violation: 0, constraint_violation_magnitude: 0.0, feasible: true, evaluated: true },
         ];
 
         let front = vec![0, 1, 2];
@@ -601,6 +653,7 @@ mod tests {
                 direction: Some(vec![-1; m]),
                 solution_data_types: vec![SolutionDataTypes::Real(Real::new(Some(0.), Some(1.)))],
                 variable_constraints: None,
+                encoding: crate::core::Encoding::PerGene,
                 eval_fn: EvalFn::Single(|x| x.clone()),
             });
             let pop: Vec<Solution> = (0..n)
@@ -613,6 +666,7 @@ mod tests {
                         constraint_values: smallvec![],
                         evaluated: true,
                         constraint_violation: 0,
+                        constraint_violation_magnitude: 0.0,
                         feasible: true,
                     }
                 })
@@ -643,6 +697,7 @@ mod tests {
                 direction: Some(vec![-1; m]),
                 solution_data_types: vec![SolutionDataTypes::Real(Real::new(Some(0.), Some(1.)))],
                 variable_constraints: None,
+                encoding: crate::core::Encoding::PerGene,
                 eval_fn: EvalFn::Single(|x| x.clone()),
             });
             let pop: Vec<Solution> = (0..n)
@@ -653,6 +708,7 @@ mod tests {
                     constraint_values: smallvec![],
                     evaluated: true,
                     constraint_violation: 0,
+                    constraint_violation_magnitude: 0.0,
                     feasible: true,
                 })
                 .collect();

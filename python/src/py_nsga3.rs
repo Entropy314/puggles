@@ -4,7 +4,7 @@ use puggles::nsga3::NSGAIII;
 use puggles::recorder_abi::{RecorderHandle, Snapshot};
 use std::sync::Arc;
 
-use crate::py_recorder::{native_recorder, run_watched_with_gil};
+use crate::py_recorder::{gpu_snapshot, native_recorder, run_watched_with_gil, GpuEval};
 use crate::py_nsgaii::extract_store;
 use crate::py_problem::set_active_problem_id;
 use crate::py_solution::PySolution;
@@ -29,7 +29,7 @@ impl PyNSGAIII {
     /// Create an NSGA-III optimizer.
     ///
     /// Args:
-    ///     problem: The Problem to optimize (a batch objective is NOT supported here — use NSGAII).
+    ///     problem: The Problem to optimize. Batch objectives are supported.
     ///     population_size: Individuals per generation. 0 derives it from the reference-point count.
     ///     divisions: Reference-point density (e.g. 12 for 3 objectives → 91 points).
     ///     execution_mode: "sequential", "multithreaded", or "gpu" (default "sequential"). A
@@ -68,17 +68,15 @@ impl PyNSGAIII {
     fn run(&mut self, py: Python<'_>, max_nfe: usize, callback: Option<PyObject>) -> PyResult<()> {
         let store = extract_store(py, &self.problem)?;
         if store.uses_batch_callable {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "NSGA-III does not support a batch objective; use NSGAII for batch_objective_function.",
-            ));
+            crate::py_problem::set_active_batch_problem_id(store.problem_id);
         }
-        if store.gpu.is_some() {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "NSGA-III evaluates one solution at a time and can't run a GpuProblem; use NSGAII.",
-            ));
+        #[cfg(feature = "gpu")]
+        if let Some(gpu) = &store.gpu {
+            crate::py_gpu::set_active_gpu_evaluator(Arc::clone(gpu));
         }
+        let gpu = store.gpu.clone();
         // A Python callable re-acquires the GIL per eval → force Sequential (see PyNSGAII).
-        let mode = if store.uses_python_callable {
+        let mode = if store.uses_python_callable || store.uses_batch_callable {
             ExecutionMode::Sequential
         } else {
             self.execution_mode
@@ -120,8 +118,8 @@ impl PyNSGAIII {
                 return Err(e);
             }
             (ga.take_archive(), std::mem::take(&mut ga.population), ga.get_nfe())
-        } else if store.uses_python_callable {
-            // Hold the GIL: the objective trampoline calls back into Python.
+        } else if store.uses_python_callable || store.uses_batch_callable {
+            // Hold the GIL: the objective (or batch) trampoline calls back into Python.
             let mut ga = NSGAIII::new(Arc::clone(&store.problem), pop_size, divisions, mode);
             if let Some(s) = seed {
                 ga = ga.with_seed(s);
@@ -133,7 +131,7 @@ impl PyNSGAIII {
                     |on_gen| ga.run_with(max_nfe, |g| on_gen(g)),
                     |g: &mut NSGAIII| {
                         dash.apply_focus(g); // goals from the page steer NSGA-III
-                        dash.record(&Snapshot::of_nsga3(g))
+                        dash.record(&gpu_snapshot(Snapshot::of_nsga3(g), &gpu))
                     },
                 )?,
                 None => ga.run(max_nfe),
@@ -147,7 +145,7 @@ impl PyNSGAIII {
                 if let Some(s) = seed {
                     ga = ga.with_seed(s);
                 }
-                run_observed(&mut ga, max_nfe, dashboard.as_ref());
+                run_observed(&mut ga, max_nfe, dashboard.as_ref(), &gpu);
                 (ga.take_archive(), std::mem::take(&mut ga.population), ga.get_nfe())
             })
         };
@@ -189,12 +187,12 @@ impl PyNSGAIII {
 
 /// `run`, recording each generation into `dashboard` when there is one (and applying goals
 /// from its page, which steer NSGA-III).
-fn run_observed(ga: &mut NSGAIII, max_nfe: usize, dashboard: Option<&RecorderHandle>) {
+fn run_observed(ga: &mut NSGAIII, max_nfe: usize, dashboard: Option<&RecorderHandle>, gpu: &GpuEval) {
     match dashboard {
         Some(dash) => {
             ga.run_with(max_nfe, |ga| {
                 dash.apply_focus(ga);
-                dash.record_and_hold(&Snapshot::of_nsga3(ga))
+                dash.record_and_hold(&gpu_snapshot(Snapshot::of_nsga3(ga), gpu))
             });
             dash.finish();
         }

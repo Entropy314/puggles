@@ -10,15 +10,14 @@
 //! simplification), not the full achievement-scalarizing hyperplane-intercept method.
 //! Good enough for typical use; swap in exact intercepts if a benchmark needs it.
 
-use crate::core::{Problem, Solution};
+use crate::core::{EvalFn, Problem, Solution};
 use crate::dominance::{crowding_distance, fast_non_dominated_sort, ParetoDominance};
-use crate::genetic_algorithms_v2::{ExecutionInfo, ExecutionMode, GenerationTimes};
+use crate::genetic_algorithms_v2::{evaluate_population_shared, ExecutionInfo, ExecutionMode, GenerationTimes};
 use crate::genetic_operators::crossover::CrossoverManager;
 use crate::genetic_operators::mutation::MutationManager;
 use crate::genetic_operators::selectors::CrowdingTournamentSelector;
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
-use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -69,6 +68,11 @@ pub struct NSGAIII {
     /// changed from outside (an observer's `&mut Self`, a new `run`).
     survivor_ranks: Option<Vec<usize>>,
     generation_times: GenerationTimes,
+    /// Optional GPU evaluator. When set and execution_mode == GPU, population evaluation is
+    /// offloaded to the GPU, matching NSGA-II. Without one, GPU downgrades to multi-threaded
+    /// with a warning instead of silently running on the CPU.
+    #[cfg(feature = "gpu")]
+    pub gpu_evaluator: Option<crate::gpu_evaluator::GpuEvaluator>,
 }
 
 impl NSGAIII {
@@ -108,7 +112,17 @@ impl NSGAIII {
             crowding: Vec::new(),
             survivor_ranks: None,
             generation_times: GenerationTimes::default(),
+            #[cfg(feature = "gpu")]
+            gpu_evaluator: None,
         }
+    }
+
+    /// Attach a GPU evaluator for use when `execution_mode == GPU`.
+    /// Builder method — call before `run()`.
+    #[cfg(feature = "gpu")]
+    pub fn with_gpu_evaluator(mut self, evaluator: crate::gpu_evaluator::GpuEvaluator) -> Self {
+        self.gpu_evaluator = Some(evaluator);
+        self
     }
 
     /// Seed all randomness for a reproducible run. Builder-style; call before `run`.
@@ -197,17 +211,55 @@ impl NSGAIII {
 
     /// Where evaluations run. NSGA-III has no GPU path: `GPU` runs on CPU threads.
     pub fn execution_info(&self) -> ExecutionInfo {
-        match self.execution_mode {
-            ExecutionMode::Sequential => ExecutionInfo::cpu(ExecutionMode::Sequential, ExecutionMode::Sequential, None),
-            ExecutionMode::MultiThreaded => {
-                ExecutionInfo::cpu(ExecutionMode::MultiThreaded, ExecutionMode::MultiThreaded, None)
-            }
-            ExecutionMode::GPU => ExecutionInfo::cpu(
-                ExecutionMode::GPU,
-                ExecutionMode::MultiThreaded,
-                Some("NSGA-III has no GPU evaluation path; evaluating on CPU threads (use NSGAII for GPU)".to_string()),
-            ),
+        let effective = self.effective_mode();
+        #[cfg(feature = "gpu")]
+        if effective == ExecutionMode::GPU {
+            let gpu = self.gpu_evaluator.as_ref().expect("effective GPU implies an evaluator");
+            return ExecutionInfo {
+                requested: self.execution_mode,
+                effective,
+                cpu_threads: None,
+                device: Some(gpu.device_description()),
+                note: None,
+            };
         }
+        let note = if matches!(self.problem.eval_fn, EvalFn::Batch(_)) {
+            Some("batch objective: called once per generation on the calling thread".to_string())
+        } else if self.execution_mode == ExecutionMode::GPU {
+            Some(if cfg!(feature = "gpu") {
+                "GPU requested but no GpuEvaluator attached; evaluating on CPU threads".to_string()
+            } else {
+                "GPU requested but puggles was built without the `gpu` feature; evaluating on CPU threads".to_string()
+            })
+        } else {
+            None
+        };
+        ExecutionInfo::cpu(self.execution_mode, effective, note)
+    }
+
+    /// The path evaluation will actually take: a batch objective runs once per generation on
+    /// the calling thread, and `GPU` needs an attached evaluator (see `NSGAII::effective_mode`).
+    pub fn effective_mode(&self) -> ExecutionMode {
+        if matches!(self.problem.eval_fn, EvalFn::Batch(_)) {
+            return ExecutionMode::Sequential;
+        }
+        if self.execution_mode == ExecutionMode::GPU {
+            #[cfg(feature = "gpu")]
+            let gpu_ready = self.gpu_evaluator.is_some();
+            #[cfg(not(feature = "gpu"))]
+            let gpu_ready = false;
+            return if gpu_ready { ExecutionMode::GPU } else { ExecutionMode::MultiThreaded };
+        }
+        self.execution_mode
+    }
+
+    /// Solutions evaluated on the GPU so far, when a GPU evaluator is attached.
+    pub fn gpu_evaluations(&self) -> Option<usize> {
+        #[cfg(feature = "gpu")]
+        if let Some(gpu) = &self.gpu_evaluator {
+            return Some(gpu.evaluated_count());
+        }
+        None
     }
 
     fn initialize(&mut self) {
@@ -222,17 +274,31 @@ impl NSGAIII {
                 constraint_values: Default::default(),
                 evaluated: false,
                 constraint_violation: 0,
+                constraint_violation_magnitude: 0.0,
                 feasible: false,
             });
         }
         self.population = pop;
     }
 
+    /// Evaluate via the shared routine, so NSGA-III gets the same batch-objective and GPU
+    /// support as NSGA-II rather than silently running everything on the CPU.
     fn evaluate(&self, population: &mut Vec<Solution>) -> usize {
-        let n: usize = match self.execution_mode {
-            ExecutionMode::Sequential => population.iter_mut().filter(|s| !s.evaluated).map(|s| { s.evaluate(); 1 }).sum(),
-            _ => population.par_iter_mut().filter(|s| !s.evaluated).map(|s| { s.evaluate(); 1 }).sum(),
-        };
+        #[cfg(feature = "gpu")]
+        {
+            if let Some(gpu) = self.gpu_evaluator.as_ref() {
+                let run_gpu = |inputs: &Vec<Vec<f64>>| gpu.evaluate_batch(inputs);
+                let n = evaluate_population_shared(
+                    population,
+                    &self.problem,
+                    self.execution_mode,
+                    Some(&run_gpu),
+                );
+                self.nfe.fetch_add(n, Ordering::Relaxed);
+                return n;
+            }
+        }
+        let n = evaluate_population_shared(population, &self.problem, self.execution_mode, None);
         self.nfe.fetch_add(n, Ordering::Relaxed);
         n
     }
@@ -528,6 +594,7 @@ mod tests {
             direction: Some(vec![-1, -1, -1]),
             solution_data_types: (0..6).map(|_| SolutionDataTypes::Real(Real::new(Some(0.0), Some(1.0)))).collect(),
             variable_constraints: None,
+            encoding: crate::core::Encoding::PerGene,
             eval_fn: EvalFn::Single(|x| {
                 let g: f64 = x[2..].iter().map(|v| (v - 0.5).powi(2)).sum();
                 vec![(1.0 + g) * x[0], (1.0 + g) * (1.0 - x[0]) * x[1], (1.0 + g) * (1.0 - x[0]) * (1.0 - x[1])]
@@ -590,11 +657,11 @@ mod tests {
     }
 
     #[test]
-    fn test_nsga3_execution_info_has_no_gpu_path() {
+    fn test_nsga3_execution_info_reports_the_gpu_fallback() {
         let problem = Arc::new(dtlz_like());
         let info = NSGAIII::new(problem, 24, 4, ExecutionMode::GPU).execution_info();
-        assert_eq!(info.effective, ExecutionMode::MultiThreaded);
-        assert!(info.note.unwrap().contains("no GPU"));
+        assert_eq!(info.effective, ExecutionMode::MultiThreaded, "no evaluator attached");
+        assert!(info.note.unwrap().contains("GPU requested"));
     }
 
     #[test]

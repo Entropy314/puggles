@@ -4,7 +4,7 @@
 **Rust:** release profile with `lto = true`, `codegen-units = 1`, rustc 1.94
 **Python (.venv):** polars-py 1.40.1 · numpy 2.4.6 · pymoo 0.6.1.6 · DEAP 1.4 · platypus-opt 1.4.1
 **Rust GA crates (§5):** genevo 0.7.1 · genetic_algorithm 0.27.2 (both single-objective)
-**Date:** 2026-07-15
+**Date:** 2026-09-09
 
 > **Optimized build.** These numbers reflect several performance changes: (1) `CrossoverManager`
 > now calls each operator **once per pair** instead of once per gene (was O(D²) work + ~2D
@@ -37,7 +37,8 @@ cargo run --release --example bench_large_data                 # §3a pipeline t
 cargo run --release --example bench_mem                        # §3b optimizer RSS (puggles native, isolated)
 for l in puggles pymoo platypus deap; do .venv/bin/python bench_opt_mem.py $l; done  # §3b optimizer RSS (isolated)
 .venv/bin/python bench_dtlz.py                                 # §4 (DTLZ2 3-obj 5-way: time + HV + IGD)
-cargo run --release --example bench_singleobj                  # §5 (single-obj: puggles vs genevo vs genetic_algorithm)
+cargo run --release --example bench_singleobj                  # §5a (Rastrigin: puggles vs genevo vs genetic_algorithm)
+cargo run --release --example bench_tsp                        # §5b (TSP/permutation: same three libraries)
 ```
 
 ---
@@ -50,8 +51,10 @@ cargo run --release --example bench_singleobj                  # §5 (single-obj
    - [3a. Preprocessing: CSV load + covariance](#3a-preprocessing-csv-load--covariance)
    - [3b. Optimizer comparison (size-invariant)](#3b-optimizer-comparison-size-invariant)
 4. [Many-Objective: DTLZ2 (3 objectives)](#4-many-objective-dtlz2)
-5. [Single-Objective: puggles vs genevo vs genetic_algorithm](#5-single-objective)
-6. [Bugs Fixed During Benchmarking](#6-bugs-fixed)
+5. [Single-Objective & Permutation: puggles vs genevo vs genetic_algorithm](#5-single-objective--permutation--puggles-vs-genevo-vs-genetic_algorithm)
+   - [5a. Rastrigin (real-valued)](#5a-rastrigin-real-valued)
+   - [5b. TSP (permutation-encoded)](#5b-permutation-encoding--travelling-salesman)
+6. [Bugs Fixed During Benchmarking](#6-bugs-fixed-during-benchmarking)
 7. [Summary and Guidance](#7-summary-and-guidance)
 
 ---
@@ -238,16 +241,20 @@ trade-off disappears once you pick the right algorithm: use NSGA-III for 3+ obje
 
 ---
 
-## 5. Single-Objective — puggles vs genevo vs genetic_algorithm
+## 5. Single-Objective & Permutation — puggles vs genevo vs genetic_algorithm
 
 Everything above is **multi-objective** (NSGA-II, Pareto fronts). Two popular Rust GA crates,
 [**genevo**](https://docs.rs/genevo) 0.7 and
 [**genetic_algorithm**](https://docs.rs/genetic_algorithm) 0.27, are **single-objective only** —
 scalar fitness, no Pareto/NSGA machinery (genetic_algorithm's own docs say *"for multiple
 objectives, combine them into a weighted sum"*). They therefore **cannot** run ZDT1/DTLZ2/the
-portfolio front; comparing them there would be meaningless. So this section drops to a level playing
-field: minimize the **Rastrigin** function (continuous, N=10, global minimum 0 at the origin), which
-all three can do — puggles runs its NSGA-II with a single objective.
+portfolio front; comparing them there would be meaningless. So this section drops to level playing
+fields both crates *can* run: a real-valued function (§5a) and, separately, a permutation-encoded
+tour (§5b) — puggles runs its NSGA-II with a single objective in both.
+
+### 5a. Rastrigin (real-valued)
+
+Minimize the **Rastrigin** function (continuous, N=10, global minimum 0 at the origin).
 
 **Apples-to-apples budget.** The fair budget for a GA comparison is a fixed number of *actual
 objective-function evaluations* (NFE) — **not** generations, because `genetic_algorithm` caches
@@ -303,12 +310,51 @@ So at equal evaluations it is no longer a lopsided gap: puggles is now within ~2
 per-evaluation cost while matching its quality. genetic_algorithm stays cheapest per evaluation (its
 aggressive fitness caching + light operators) but converts each evaluation into the poorest solution.
 
-**Takeaway:** puggles is built for *multi-objective* work, where it dominates (§1–§4); on
-*single-objective* problems its per-evaluation overhead is now modest rather than crippling. For cheap
-objectives where raw throughput is everything a dedicated single-objective crate still wins wall-clock;
-for expensive objectives the choice is dominated by evaluation cost, not GA bookkeeping. (Not an
-algorithm-controlled comparison: the *budget, population, and problem* are identical, but each crate
-uses its own operator set — no two expose the same one.)
+### 5b. Permutation encoding — travelling salesman
+
+Rastrigin is real-valued; permutation encoding (`Problem::with_permutation_encoding()`, added
+alongside this section) is a different representation entirely — genes are a permutation of
+`0..N`, so whole-vector operators (order crossover, swap mutation) replace the per-gene ones.
+Both Rust crates have their own permutation machinery, so the same three libraries can be raced
+on it: minimize the length of a closed tour over N random cities.
+
+**Each library's own permutation operators — not a shared one:**
+
+- **puggles** — `Encoding::Permutation`: order crossover (OX1) + swap mutation
+  ([`src/genetic_operators/{crossover,mutation}.rs`](../src/genetic_operators)).
+- **genevo** — a custom `GenomeBuilder<Vec<usize>>` plus its built-in `OrderOneCrossover` (OX1)
+  and `SwapOrderMutator` (`genevo::operator::prelude`) — the same OX1 family puggles uses.
+- **genetic_algorithm** — `UniqueGenotype`. Its own docs say it *"does not support gene or point
+  crossover"* for permutation genomes — only `CrossoverClone`/`CrossoverRejuvenate`, neither of
+  which recombines genes at all. So this library's TSP search is swap-mutation + selection only;
+  that is a real difference in what is being compared, not a missed tuning knob.
+
+**Settings:** 30 cities · pop=60 · **budget = 60,000 evaluations** · 10 runs (puggles &
+genetic_algorithm seeded per run) · 1 warm-up. Same equal-NFE approach as §5a (`genetic_algorithm`
+caches fitness, so generation count isn't a fair unit). Driver:
+[`examples/bench_tsp.rs`](examples/bench_tsp.rs).
+
+| library | ms / run | ±std | evals | best tour (→ shorter) | µs / eval |
+| --- | --- | --- | --- | --- | --- |
+| genetic_algorithm | **26.1** | 0.1 | 56,899 | 621.77 | **0.46** |
+| puggles | 33.8 | 0.3 | 60,000 | **540.47** | 0.56 |
+| genevo | 35.0 | 0.7 | 60,048 | 543.03 | 0.58 |
+
+**puggles and genevo land within 0.5% of each other** (540.47 vs 543.03) — unsurprising, since
+both use the same OX1-crossover-plus-swap-mutation family. **genetic_algorithm's tour is 15%
+longer** despite being the fastest per evaluation: without real recombination, swap mutation alone
+can't propagate a good sub-tour from one individual to another, only wander the current one. This
+is the mirror image of §5a's finding — there, genetic_algorithm's *cheap* operators cost it
+quality on a multi-modal landscape; here, its *missing* operator (crossover) costs it quality on a
+combinatorial one. In both cases the cheapest library per evaluation reaches the worst answer.
+
+**Takeaway:** puggles is built for *multi-objective* work, where it dominates outright (§1–§4); on
+*single-objective* problems (§5a) and *permutation* problems (§5b) its per-evaluation overhead is
+modest, and on both it reaches the best solution per evaluation of the three. A dedicated
+single-objective crate can still win wall-clock when the objective is cheap and evaluations are
+plentiful; once evaluation cost or solution quality matters more than raw throughput, the choice
+tilts back. (Not an algorithm-controlled comparison in either subsection: the *budget, population,
+and problem* are identical, but each crate uses its own operator set — no two expose the same one.)
 
 ---
 
@@ -372,9 +418,13 @@ DataFrame, not the optimizer — see §3a/§3b.)
 wall-time per evaluation. A single-objective fast path (added in `src/dominance.rs`) cut puggles's
 per-evaluation cost ~3× (2.75 → 0.90 µs) by skipping the O(N²) Pareto sort when there is one
 objective, so it now sits within ~2× of genevo instead of ~6× behind; genetic_algorithm remains
-cheapest per evaluation. Pick the tool to the problem: puggles for Pareto/multi-objective (or
-single-objective where each evaluation is expensive), a dedicated single-objective crate when
-evaluations are cheap and wall-clock throughput is everything.
+cheapest per evaluation. On **permutation-encoded** problems (§5b, TSP) the same pattern holds
+from the other direction: genetic_algorithm's `UniqueGenotype` has no real crossover, so it's
+fastest per evaluation but finds tours 15% longer than puggles/genevo, which both use order
+crossover (OX1). Pick the tool to the problem: puggles for Pareto/multi-objective (or
+single-objective/permutation problems where each evaluation is expensive or solution quality
+matters), a dedicated single-objective crate when evaluations are cheap and wall-clock throughput
+is everything.
 
 ### Execution-mode guidance
 

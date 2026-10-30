@@ -71,6 +71,7 @@ fn main() {
         direction: Some(vec![-1; M]),
         solution_data_types: types,
         variable_constraints: None,
+        encoding: puggles::core::Encoding::PerGene,
         eval_fn: EvalFn::Single(dtlz2),
     });
 

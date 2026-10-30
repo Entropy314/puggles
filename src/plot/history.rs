@@ -78,6 +78,9 @@ impl RunView for NSGAIII {
     fn execution(&self) -> Option<ExecutionInfo> {
         Some(self.execution_info())
     }
+    fn gpu_evaluations(&self) -> Option<usize> {
+        NSGAIII::gpu_evaluations(self)
+    }
     fn generation_times(&self) -> Option<GenerationTimes> {
         Some(self.last_generation_times())
     }

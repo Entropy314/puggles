@@ -23,6 +23,10 @@ pub struct SolutionRecord {
     pub objective_fitness_values: Vec<f64>,
     pub constraint_values: Vec<f64>,
     pub constraint_violation: usize,
+    /// Total magnitude of constraint violation (0.0 when feasible). Defaults to 0.0 when
+    /// absent, so checkpoints written before this field existed still load.
+    #[serde(default)]
+    pub constraint_violation_magnitude: f64,
     pub feasible: bool,
     pub evaluated: bool,
 }
@@ -34,6 +38,7 @@ impl SolutionRecord {
             objective_fitness_values: s.objective_fitness_values.to_vec(),
             constraint_values: s.constraint_values.to_vec(),
             constraint_violation: s.constraint_violation,
+            constraint_violation_magnitude: s.constraint_violation_magnitude,
             feasible: s.feasible,
             evaluated: s.evaluated,
         }
@@ -46,6 +51,7 @@ impl SolutionRecord {
             objective_fitness_values: self.objective_fitness_values.into(),
             constraint_values: self.constraint_values.into(),
             constraint_violation: self.constraint_violation,
+            constraint_violation_magnitude: self.constraint_violation_magnitude,
             feasible: self.feasible,
             evaluated: self.evaluated,
         }

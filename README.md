@@ -1,11 +1,10 @@
 # puggles
 
-A multi-objective evolutionary optimization library written in Rust. Implements **NSGA-II** and the reference-point **NSGA-III** (for 3+ objectives) for single- and multi-objective problems over continuous, integer, and binary decision variables, with constraint handling, parallel (Rayon) evaluation, seeded reproducible runs, and optional GPU acceleration and browser plots.
+A multi-objective evolutionary optimization library written in Rust. Implements **NSGA-II** and the reference-point **NSGA-III** (for 3+ objectives) for single- and multi-objective problems over continuous, integer, binary and permutation decision variables, with constraint handling, parallel (Rayon) evaluation, an island model, checkpoints, seeded reproducible runs, and optional GPU acceleration and browser plots.
 
 > **Python:** `pip install puggles` ([PyPI](https://pypi.org/project/puggles/), source in `python/`). The live dashboard is an optional add-on: `pip install "puggles[dashboard]"` (source in `python-dashboard/`).
 >
 > **Full documentation:** see [GUIDE.md](GUIDE.md) for walkthroughs, the complete API, and configuration reference. Release notes: [CHANGELOG.md](CHANGELOG.md).
-
 
 ---
 
@@ -21,7 +20,7 @@ puggles = "0.3"
 
 | Feature | Adds | Dependencies |
 | --- | --- | --- |
-| *(none)* | NSGA-II, NSGA-III, all encodings, constraints, Rayon parallelism, checkpoints, metrics | `rand`, `rayon`, `serde`, `smallvec` |
+| *(none)* | NSGA-II, NSGA-III, all encodings (incl. permutations), constraints, Rayon parallelism, island model, checkpoints, metrics | `rand`, `rayon`, `serde`, `smallvec` |
 | `plot` | `puggles::plot`: ggplot-style figures, run recording, a live browser dashboard | + `serde_json` |
 | `gpu` | `puggles::gpu_evaluator`: objectives in a WGSL compute shader | + `wgpu`, `pollster` |
 
@@ -74,12 +73,31 @@ fn main() {
 ```rust
 use puggles::gatypes::{Real, Integer, BitBinary, SolutionDataTypes};
 
-SolutionDataTypes::Real(Real::new(Some(-10.0), Some(10.0)))  // continuous float in [-10, 10)
-SolutionDataTypes::Integer(Integer::new(Some(-100), Some(100))) // integer in [-100, 100)
+SolutionDataTypes::Real(Real::new(Some(-10.0), Some(10.0)))  // continuous float in [-10, 10]
+SolutionDataTypes::Integer(Integer::new(Some(-100), Some(100))) // integer in [-100, 100]
 SolutionDataTypes::BitBinary(BitBinary::new())               // 0 or 1
 ```
 
+**Bounds are closed on both ends.** Generation, crossover, and mutation all draw from and clamp
+into `[lower, upper]`, so the upper bound is reachable everywhere. `Real` requires finite bounds;
+`try_new` reports invalid bounds as an error instead of panicking:
+
+```rust
+Real::try_new(Some(0.0), Some(1.0))?;   // Result<Real, ConfigError>
+Problem::try_new(/* ... */)?;           // same, for whole-problem configuration
+```
+
 Mix them freely within one problem — crossover and mutation adapt per variable type. Defaults: `Real` → SBX crossover + polynomial mutation; `Integer` → uniform crossover + polynomial mutation (rounded); `BitBinary` → uniform crossover + bit-flip mutation. Every mutation runs at the conventional per-gene rate `1/n`.
+
+### Permutation encoding
+
+For ordering problems (TSP, scheduling), switch the whole problem to permutation encoding.
+Every solution is then a permutation of `0..solution_length`, varied with order crossover (OX1)
+and swap mutation so offspring stay valid permutations:
+
+```rust
+let problem = Problem::new(/* ... */).with_permutation_encoding();
+```
 
 ---
 
@@ -109,7 +127,15 @@ let problem = Problem::new(/* ... */)
     .with_variable_constraints(vec![|x: &Vec<f64>| 1.0 - x.iter().sum::<f64>()]); // sum(x) >= 1
 ```
 
-Both optimizers use constraint-based dominance: a feasible solution dominates any infeasible one, and among infeasible solutions the one with fewer violations wins. `sol.constraint_violation` counts how many constraints a solution breaks; `sol.feasible` is `true` when none are broken.
+Both optimizers use Deb's constrained-domination:
+
+1. a feasible solution dominates any infeasible one;
+2. among infeasible solutions, fewer violated constraints wins;
+3. on a tie, the smaller **total violation magnitude** wins — how far outside the feasible
+   region the solution sits, not just how many constraints it breaks.
+
+`sol.constraint_violation` counts broken constraints, `sol.constraint_violation_magnitude`
+measures by how much, and `sol.feasible` is `true` when none are broken.
 
 ---
 
@@ -132,7 +158,7 @@ let front = ga.get_archive();
 
 ## Reproducible runs
 
-`with_seed(seed)` (on both optimizers) seeds the initial population, crossover, mutation and selection, so a run repeats exactly — pair it with `ExecutionMode::Sequential`, since multithreaded evaluation interleaves non-deterministically. `save_state()` / `load_state()` checkpoint a run (see [`checkpoint`](src/checkpoint.rs)), and [`metrics`](src/metrics.rs) has `igd`, `hypervolume_2d` and `spacing` for scoring fronts.
+`with_seed(seed)` (on both optimizers) seeds the initial population, crossover, mutation and selection, so a run repeats exactly — pair it with `ExecutionMode::Sequential`, since multithreaded evaluation interleaves non-deterministically. To pause and resume a run, see [Checkpoint & resume](#checkpoint--resume).
 
 ---
 
@@ -181,6 +207,55 @@ On construction the evaluator prints the selected adapter to stderr (`puggles: G
 use puggles::benchmark_objective_functions::dtlz2;
 let problem = Arc::new(Problem::new(12, 3, None, None, Some(vec![-1; 3]),
     types, dtlz2));
+```
+
+---
+
+## Convergence & stopping
+
+Beyond a fixed evaluation budget, a run can stop when it stops improving:
+
+```rust
+ga.run_until_converged(max_nfe, patience, epsilon);          // per-objective-best plateau
+ga.run_until_hv_converged(max_nfe, patience, epsilon, [11.0, 11.0]); // hypervolume plateau (2 objectives)
+```
+
+Hypervolume is diversity-aware: it responds to the front filling in, not just extending.
+`ga.archive_hypervolume(reference)` reports it directly, and `puggles::metrics` also provides
+`igd` and `spacing`.
+
+---
+
+## Island model
+
+Several independent populations explored in parallel, then merged into one front. Trades
+per-island depth for coverage, and is embarrassingly parallel:
+
+```rust
+use puggles::islands::{run_islands, IslandConfig};
+
+let front = run_islands(problem, IslandConfig {
+    islands: 8,
+    population_size: 50,
+    max_nfe_per_island: 10_000,
+    seed: Some(0),
+    ..Default::default()
+});
+```
+
+Island `i` runs with `seed + i`, so a given base seed reproduces the whole run.
+
+---
+
+## Checkpoint & resume
+
+`GaState` derives `serde`, so a run can be paused and resumed in any format:
+
+```rust
+let json = serde_json::to_string(&ga.save_state())?;
+// ... later, against the same Problem ...
+ga.load_state(serde_json::from_str(&json)?);
+ga.run(cumulative_budget);
 ```
 
 ---
