@@ -10,9 +10,9 @@
 //! simplification), not the full achievement-scalarizing hyperplane-intercept method.
 //! Good enough for typical use; swap in exact intercepts if a benchmark needs it.
 
-use crate::core::{Problem, Solution};
+use crate::core::{EvalFn, Problem, Solution};
 use crate::dominance::{crowding_distance, fast_non_dominated_sort, ParetoDominance};
-use crate::genetic_algorithms_v2::{evaluate_population_shared, ExecutionMode};
+use crate::genetic_algorithms_v2::{evaluate_population_shared, ExecutionInfo, ExecutionMode, GenerationTimes};
 use crate::genetic_operators::crossover::CrossoverManager;
 use crate::genetic_operators::mutation::MutationManager;
 use crate::genetic_operators::selectors::CrowdingTournamentSelector;
@@ -20,6 +20,7 @@ use rand::rngs::SmallRng;
 use rand::SeedableRng;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Structured reference points on the unit simplex (Das & Dennis): every point has
 /// non-negative coordinates summing to 1, on a grid of `divisions` steps. For `m`
@@ -57,8 +58,16 @@ pub struct NSGAIII {
     crossover_manager: CrossoverManager,
     rng: SmallRng,
     reference_points: Vec<Vec<f64>>,
+    /// The uniform Das–Dennis grid, kept so a focus can be cleared.
+    base_reference_points: Vec<Vec<f64>>,
     ranks: Vec<usize>,
     crowding: Vec<f64>,
+    /// Each population member's front, as survival found it — exact for the population, since
+    /// it is whole fronts 0..k-1 plus part of front k — so the next generation's parent
+    /// selection and the archive need no second sort. `None` once the population may have been
+    /// changed from outside (an observer's `&mut Self`, a new `run`).
+    survivor_ranks: Option<Vec<usize>>,
+    generation_times: GenerationTimes,
     /// Optional GPU evaluator. When set and execution_mode == GPU, population evaluation is
     /// offloaded to the GPU, matching NSGA-II. Without one, GPU downgrades to multi-threaded
     /// with a warning instead of silently running on the CPU.
@@ -97,9 +106,12 @@ impl NSGAIII {
             mutation_manager,
             crossover_manager: CrossoverManager::new(),
             rng: SmallRng::from_entropy(),
+            base_reference_points: reference_points.clone(),
             reference_points,
             ranks: Vec::new(),
             crowding: Vec::new(),
+            survivor_ranks: None,
+            generation_times: GenerationTimes::default(),
             #[cfg(feature = "gpu")]
             gpu_evaluator: None,
         }
@@ -120,6 +132,11 @@ impl NSGAIII {
         self
     }
 
+    /// Move the archive out (leaving it empty), e.g. when the optimizer is about to be dropped.
+    pub fn take_archive(&mut self) -> Vec<Solution> {
+        std::mem::take(&mut self.archive)
+    }
+
     pub fn get_archive(&self) -> &[Solution] {
         &self.archive
     }
@@ -128,6 +145,121 @@ impl NSGAIII {
     }
     pub fn reference_points(&self) -> &[Vec<f64>] {
         &self.reference_points
+    }
+
+    /// Concentrate the search near `aspiration` (one target value per objective, in objective
+    /// space; `NaN` = no preference, use the best value found). The reference grid is shrunk
+    /// around the aspiration's direction from the current ideal point (as in R-NSGA-III);
+    /// `spread` in (0, 1] sets how tightly (1 = the full front). Takes effect from the next
+    /// generation; safe to call mid-run from `run_with`.
+    pub fn focus_on(&mut self, aspiration: &[f64], spread: f64) {
+        let m = self.problem.number_of_objectives;
+        if self.population.is_empty() || aspiration.len() != m {
+            return;
+        }
+        let dirs = self.problem.direction.clone().unwrap_or_else(|| vec![-1; m]);
+        let idx: Vec<usize> = (0..self.population.len()).collect();
+        let val = |i: usize, o: usize| {
+            let v = self.population[i].objective_fitness_values[o];
+            if dirs[o] == 1 { -v } else { v }
+        };
+        let (mut ideal, mut nadir) = (vec![f64::INFINITY; m], vec![f64::NEG_INFINITY; m]);
+        for &i in &idx {
+            for o in 0..m {
+                ideal[o] = ideal[o].min(val(i, o));
+                nadir[o] = nadir[o].max(val(i, o));
+            }
+        }
+        // The aspiration in the same normalized minimization space the niching uses.
+        let mut d: Vec<f64> = (0..m)
+            .map(|o| {
+                let z = aspiration[o];
+                if !z.is_finite() {
+                    return 0.0;
+                }
+                let z = if dirs[o] == 1 { -z } else { z };
+                let range = nadir[o] - ideal[o];
+                if range > f64::EPSILON { ((z - ideal[o]) / range).max(0.0) } else { 0.0 }
+            })
+            .collect();
+        let sum: f64 = d.iter().sum();
+        if sum > f64::EPSILON {
+            d.iter_mut().for_each(|v| *v /= sum);
+        } else {
+            d = vec![1.0 / m as f64; m];
+        }
+        let spread = spread.clamp(0.01, 1.0);
+        let centroid = 1.0 / m as f64;
+        self.reference_points = self
+            .base_reference_points
+            .iter()
+            .map(|p| {
+                let mut q: Vec<f64> = p.iter().zip(&d).map(|(pi, di)| (di + spread * (pi - centroid)).max(0.0)).collect();
+                let s: f64 = q.iter().sum();
+                if s > f64::EPSILON {
+                    q.iter_mut().for_each(|v| *v /= s);
+                }
+                q
+            })
+            .collect();
+    }
+
+    /// Back to the uniform reference grid (the whole front).
+    pub fn clear_focus(&mut self) {
+        self.reference_points = self.base_reference_points.clone();
+    }
+
+    /// Where evaluations run. NSGA-III has no GPU path: `GPU` runs on CPU threads.
+    pub fn execution_info(&self) -> ExecutionInfo {
+        let effective = self.effective_mode();
+        #[cfg(feature = "gpu")]
+        if effective == ExecutionMode::GPU {
+            let gpu = self.gpu_evaluator.as_ref().expect("effective GPU implies an evaluator");
+            return ExecutionInfo {
+                requested: self.execution_mode,
+                effective,
+                cpu_threads: None,
+                device: Some(gpu.device_description()),
+                note: None,
+            };
+        }
+        let note = if matches!(self.problem.eval_fn, EvalFn::Batch(_)) {
+            Some("batch objective: called once per generation on the calling thread".to_string())
+        } else if self.execution_mode == ExecutionMode::GPU {
+            Some(if cfg!(feature = "gpu") {
+                "GPU requested but no GpuEvaluator attached; evaluating on CPU threads".to_string()
+            } else {
+                "GPU requested but puggles was built without the `gpu` feature; evaluating on CPU threads".to_string()
+            })
+        } else {
+            None
+        };
+        ExecutionInfo::cpu(self.execution_mode, effective, note)
+    }
+
+    /// The path evaluation will actually take: a batch objective runs once per generation on
+    /// the calling thread, and `GPU` needs an attached evaluator (see `NSGAII::effective_mode`).
+    pub fn effective_mode(&self) -> ExecutionMode {
+        if matches!(self.problem.eval_fn, EvalFn::Batch(_)) {
+            return ExecutionMode::Sequential;
+        }
+        if self.execution_mode == ExecutionMode::GPU {
+            #[cfg(feature = "gpu")]
+            let gpu_ready = self.gpu_evaluator.is_some();
+            #[cfg(not(feature = "gpu"))]
+            let gpu_ready = false;
+            return if gpu_ready { ExecutionMode::GPU } else { ExecutionMode::MultiThreaded };
+        }
+        self.execution_mode
+    }
+
+    /// Solutions evaluated on the GPU so far, when a GPU evaluator is attached.
+    pub fn gpu_evaluations(&self) -> Option<usize> {
+        #[cfg(feature = "gpu")]
+        if let Some(gpu) = &self.gpu_evaluator {
+            return Some(gpu.evaluated_count());
+        }
+        None
     }
 
     fn initialize(&mut self) {
@@ -173,6 +305,22 @@ impl NSGAIII {
 
     /// Run until the NFE budget is spent. Auto-initializes.
     pub fn run(&mut self, max_nfe: usize) {
+        self.run_inner(max_nfe, false, |_| true);
+    }
+
+    /// `run`, calling `on_generation` after every generation with the archive refreshed to the
+    /// current non-dominated front. Return `false` from it to stop early. Used for live
+    /// progress / dashboards.
+    ///
+    /// The closure gets `&mut Self`, so it can steer between generations (e.g. [`focus_on`](Self::focus_on)).
+    pub fn run_with(&mut self, max_nfe: usize, on_generation: impl FnMut(&mut Self) -> bool) {
+        self.run_inner(max_nfe, true, on_generation);
+    }
+
+    /// `run` skips the per-generation archive refresh (a full non-dominated sort) that only
+    /// an observer needs, so plain runs cost exactly what they did before `run_with` existed.
+    fn run_inner(&mut self, max_nfe: usize, refresh_archive: bool, mut on_generation: impl FnMut(&mut Self) -> bool) {
+        self.survivor_ranks = None;
         if self.population.is_empty() {
             self.initialize();
         }
@@ -184,44 +332,76 @@ impl NSGAIII {
         while self.nfe.load(Ordering::Relaxed) < max_nfe {
             let remaining = max_nfe - self.nfe.load(Ordering::Relaxed);
             self.iterate_n(remaining.min(self.population_size));
+            if refresh_archive {
+                let started = Instant::now();
+                self.archive = self.population_front0();
+                self.generation_times.archive = started.elapsed().as_secs_f64();
+            }
+            if !on_generation(self) {
+                break;
+            }
+            if refresh_archive {
+                // An observer gets `&mut Self` and may have changed the population.
+                self.survivor_ranks = None;
+            }
         }
-        self.archive = self.nondominated(&self.population);
+        self.archive = self.population_front0();
     }
 
     /// Run one generation, creating at most `max_offspring` new solutions, so `run` can honour
     /// its NFE budget exactly instead of overshooting by up to a full population.
     fn iterate_n(&mut self, max_offspring: usize) {
+        let started = Instant::now();
         // Parent selection by rank + crowding tournament (crowding is cheap and harmless).
         self.assign_fitness();
         let parent_indices = self.selector.select_indices(self.population_size, &self.ranks, &self.crowding);
-        let parents: Vec<Solution> = parent_indices.iter().map(|&i| self.population[i].clone()).collect();
-
+        // Index parents directly instead of cloning them all into a scratch Vec.
+        let np = parent_indices.len();
         let mut offspring: Vec<Solution> = Vec::with_capacity(max_offspring);
         let mut i = 0;
         while offspring.len() < max_offspring {
-            let p1 = &parents[i % parents.len()];
-            let p2 = &parents[(i + 1) % parents.len()];
+            let p1 = &self.population[parent_indices[i % np]];
+            let p2 = &self.population[parent_indices[(i + 1) % np]];
             i += 2;
-            for child in self.crossover_manager.perform_crossover(p1, p2, &mut self.rng) {
+            let (c1, c2) = self.crossover_manager.perform_crossover_pair(p1, p2, &mut self.rng);
+            for child in [c1, c2] {
                 if offspring.len() < max_offspring {
-                    offspring.push(self.mutation_manager.mutate(&child, &mut self.rng));
+                    offspring.push(self.mutation_manager.mutate_owned(child, &mut self.rng));
                 }
             }
         }
+        let varied = Instant::now();
         self.evaluate(&mut offspring);
+        let evaluated = Instant::now();
 
         let mut combined = std::mem::take(&mut self.population);
         combined.extend(offspring);
-        self.population = self.environmental_selection(&combined);
+        let (survivors, ranks) = self.environmental_selection(combined);
+        self.population = survivors;
+        self.survivor_ranks = Some(ranks);
+
+        let t = &mut self.generation_times;
+        t.variation = (varied - started).as_secs_f64();
+        t.evaluation = (evaluated - varied).as_secs_f64();
+        t.selection = evaluated.elapsed().as_secs_f64();
+    }
+
+    /// Time spent in each phase of the most recent generation. `archive` is only measured
+    /// under `run_with` (plain `run` skips the per-generation archive refresh).
+    pub fn last_generation_times(&self) -> GenerationTimes {
+        self.generation_times
     }
 
     fn assign_fitness(&mut self) {
         let n = self.population.len();
         self.ranks.resize(n, 0);
         self.crowding.resize(n, 0.0);
-        let fronts = fast_non_dominated_sort(&self.population, &self.dominance);
+        let fronts = match self.survivor_ranks.take() {
+            Some(ranks) if ranks.len() == n => fronts_from_ranks(&ranks),
+            _ => fast_non_dominated_sort(&self.population, &self.dominance),
+        };
         for (rank, front) in fronts.iter().enumerate() {
-            let cd = crowding_distance(&self.population, front);
+            let cd = crowding_by_index(&self.population, front);
             for (local, &global) in front.iter().enumerate() {
                 self.ranks[global] = rank;
                 self.crowding[global] = cd[local];
@@ -229,40 +409,64 @@ impl NSGAIII {
         }
     }
 
+    /// The population's first front, from the survival ranks when they're current.
+    fn population_front0(&self) -> Vec<Solution> {
+        match &self.survivor_ranks {
+            Some(ranks) if ranks.len() == self.population.len() => {
+                let front0: Vec<usize> = (0..ranks.len()).filter(|&i| ranks[i] == 0).collect();
+                let pop = &self.population;
+                crate::core::first_of_each_genome(pop, &front0).into_iter().map(|i| pop[i].clone()).collect()
+            }
+            _ => self.nondominated(&self.population),
+        }
+    }
+
+    /// The first front, without repeated genomes (identical copies never dominate each other).
     fn nondominated(&self, pop: &[Solution]) -> Vec<Solution> {
         let fronts = fast_non_dominated_sort(pop, &self.dominance);
-        fronts.first().map(|f| f.iter().map(|&i| pop[i].clone()).collect()).unwrap_or_default()
+        match fronts.into_iter().next() {
+            Some(mut f) => {
+                f.sort_unstable(); // population order, as `population_front0` gives it
+                crate::core::first_of_each_genome(pop, &f).into_iter().map(|i| pop[i].clone()).collect()
+            }
+            None => Vec::new(),
+        }
     }
 
     /// NSGA-III survival: fill by front, then niche the splitting front against reference points.
-    fn environmental_selection(&self, combined: &[Solution]) -> Vec<Solution> {
+    /// Returns the survivors and each one's front.
+    fn environmental_selection(&self, combined: Vec<Solution>) -> (Vec<Solution>, Vec<usize>) {
         let target = self.population_size;
-        let fronts = fast_non_dominated_sort(combined, &self.dominance);
+        let fronts = fast_non_dominated_sort(&combined, &self.dominance);
 
         let mut selected: Vec<usize> = Vec::new();
+        let mut ranks: Vec<usize> = Vec::with_capacity(target);
         let mut splitting: Vec<usize> = Vec::new();
-        for front in &fronts {
+        for (rank, front) in fronts.iter().enumerate() {
             if selected.len() + front.len() <= target {
                 selected.extend(front.iter().copied());
+                ranks.resize(selected.len(), rank);
             } else {
                 splitting = front.clone();
                 break;
             }
         }
         if selected.len() == target || splitting.is_empty() {
-            selected.truncate(target);
-            return selected.iter().map(|&i| combined[i].clone()).collect();
+            return (take_in_order(combined, &selected), ranks);
         }
+        let splitting_rank = ranks.last().map_or(0, |r| r + 1);
 
         // Normalize objectives (minimization space) over selected ∪ splitting.
         let m = self.problem.number_of_objectives;
         let dirs = self.problem.direction.clone().unwrap_or_else(|| vec![-1; m]);
         let mut pool: Vec<usize> = selected.clone();
         pool.extend(splitting.iter().copied());
-        let norm = normalize(combined, &pool, m, &dirs);
+        let norm = normalize(&combined, &pool, m, &dirs);
 
         // Associate each pool member with its nearest reference point (perpendicular distance).
-        let (assoc, dist): (Vec<usize>, Vec<f64>) = norm.iter().map(|p| associate(p, &self.reference_points)).unzip();
+        let ref_norms: Vec<f64> = self.reference_points.iter().map(|r| r.iter().map(|x| x * x).sum()).collect();
+        let (assoc, dist): (Vec<usize>, Vec<f64>) =
+            norm.iter().map(|p| associate(p, &self.reference_points, &ref_norms)).unzip();
 
         // Niche counts from the already-selected members (pool[0..selected.len()]).
         let mut niche = vec![0usize; self.reference_points.len()];
@@ -276,26 +480,56 @@ impl NSGAIII {
         let mut chosen: Vec<usize> = Vec::new();
 
         while chosen.len() < need {
-            // Reference point(s) with the smallest niche count that still have candidates.
-            let refs_with_candidates: Vec<usize> = avail.iter().map(|&k| assoc[k]).collect();
-            let min_niche = refs_with_candidates.iter().map(|&r| niche[r]).min().unwrap();
-            let cand_refs: Vec<usize> = refs_with_candidates.into_iter().filter(|&r| niche[r] == min_niche).collect();
-            // Pick one such reference point (deterministic: smallest index).
-            let j = *cand_refs.iter().min().unwrap();
+            // The reference point with the smallest niche count that still has candidates
+            // (ties: smallest index), found in one pass with no scratch Vecs.
+            let j = avail.iter().map(|&k| (niche[assoc[k]], assoc[k])).min().expect("candidates left").1;
 
-            // Candidates associated with j.
-            let members: Vec<usize> = avail.iter().copied().filter(|&k| assoc[k] == j).collect();
-            // If this niche is empty, take the closest candidate; otherwise any (take closest too).
-            let pick = *members.iter().min_by(|&&a, &&b| dist[a].partial_cmp(&dist[b]).unwrap_or(std::cmp::Ordering::Equal)).unwrap();
+            // Its closest candidate (ties: the first in `avail`).
+            let mut pos = None::<usize>;
+            for (p, &k) in avail.iter().enumerate() {
+                if assoc[k] != j {
+                    continue;
+                }
+                match pos {
+                    Some(b) if dist[avail[b]].partial_cmp(&dist[k]) != Some(std::cmp::Ordering::Greater) => {}
+                    _ => pos = Some(p),
+                }
+            }
+            let pick = avail.remove(pos.expect("reference point has a candidate"));
 
             chosen.push(pool[pick]);
             niche[j] += 1;
-            avail.retain(|&k| k != pick);
         }
 
+        ranks.resize(selected.len() + chosen.len(), splitting_rank);
         selected.extend(chosen);
-        selected.iter().map(|&i| combined[i].clone()).collect()
+        (take_in_order(combined, &selected), ranks)
     }
+}
+
+/// Crowding distance with ties broken by population index, so it doesn't depend on the order of
+/// `front` — a front from survival ranks and one from a fresh sort give the same values, which
+/// keeps `run_with` (which must re-sort after its observer) identical to `run`.
+fn crowding_by_index(pop: &[Solution], front: &[usize]) -> Vec<f64> {
+    let mut sorted = front.to_vec();
+    sorted.sort_unstable();
+    let by_index = crowding_distance(pop, &sorted);
+    front.iter().map(|i| by_index[sorted.binary_search(i).expect("member of front")]).collect()
+}
+
+/// Fronts (lists of indices, in order) from each member's front number.
+fn fronts_from_ranks(ranks: &[usize]) -> Vec<Vec<usize>> {
+    let mut fronts: Vec<Vec<usize>> = vec![Vec::new(); ranks.iter().max().map_or(0, |r| r + 1)];
+    for (i, &r) in ranks.iter().enumerate() {
+        fronts[r].push(i);
+    }
+    fronts
+}
+
+/// Move `pop[i]` for each (distinct) `i` in `idx` out of `pop`, in that order — no clones.
+fn take_in_order(pop: Vec<Solution>, idx: &[usize]) -> Vec<Solution> {
+    let mut slots: Vec<Option<Solution>> = pop.into_iter().map(Some).collect();
+    idx.iter().map(|&i| slots[i].take().expect("distinct survivor indices")).collect()
 }
 
 /// Translate by the ideal point and divide by the per-objective range, in minimization space.
@@ -327,10 +561,10 @@ fn normalize(pop: &[Solution], idx: &[usize], m: usize, dirs: &[i8]) -> Vec<Vec<
 
 /// Nearest reference point by perpendicular distance from `point` to the line through the origin
 /// and the reference point. Returns (reference index, distance).
-fn associate(point: &[f64], refs: &[Vec<f64>]) -> (usize, f64) {
+/// `ref_norms[j]` is the squared length of `refs[j]`.
+fn associate(point: &[f64], refs: &[Vec<f64>], ref_norms: &[f64]) -> (usize, f64) {
     let mut best = (0usize, f64::INFINITY);
-    for (j, r) in refs.iter().enumerate() {
-        let rr: f64 = r.iter().map(|x| x * x).sum();
+    for (j, (r, &rr)) in refs.iter().zip(ref_norms).enumerate() {
         if rr < f64::EPSILON {
             continue;
         }
@@ -400,5 +634,64 @@ mod tests {
             ga.get_archive().iter().map(|s| s.objective_fitness_values.clone()).collect::<Vec<_>>()
         };
         assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn test_nsga3_run_with_matches_run_and_stops_early() {
+        let problem = Arc::new(dtlz_like());
+        let front = |ga: &NSGAIII| {
+            ga.get_archive().iter().map(|s| s.objective_fitness_values.clone()).collect::<Vec<_>>()
+        };
+        let mut plain = NSGAIII::new(Arc::clone(&problem), 24, 4, ExecutionMode::Sequential).with_seed(3);
+        plain.run(1_200);
+        let mut observed = NSGAIII::new(Arc::clone(&problem), 24, 4, ExecutionMode::Sequential).with_seed(3);
+        observed.run_with(1_200, |ga| {
+            assert!(!ga.get_archive().is_empty(), "archive must be current during the run");
+            true
+        });
+        assert_eq!(front(&plain), front(&observed), "observing a run must not change it");
+
+        let mut stopped = NSGAIII::new(Arc::clone(&problem), 24, 4, ExecutionMode::Sequential);
+        stopped.run_with(1_000_000, |ga| ga.get_nfe() < 200);
+        assert!(stopped.get_nfe() < 1_000, "returning false must stop the run");
+    }
+
+    #[test]
+    fn test_nsga3_execution_info_reports_the_gpu_fallback() {
+        let problem = Arc::new(dtlz_like());
+        let info = NSGAIII::new(problem, 24, 4, ExecutionMode::GPU).execution_info();
+        assert_eq!(info.effective, ExecutionMode::MultiThreaded, "no evaluator attached");
+        assert!(info.note.unwrap().contains("GPU requested"));
+    }
+
+    #[test]
+    fn test_focus_concentrates_the_front_near_the_aspiration() {
+        let problem = Arc::new(dtlz_like());
+        let spread_of = |focus: bool| {
+            let mut ga = NSGAIII::new(Arc::clone(&problem), 48, 6, ExecutionMode::Sequential).with_seed(5);
+            ga.run_with(6_000, |ga| {
+                if focus && ga.get_nfe() == 48 * 2 {
+                    ga.focus_on(&[0.1, 0.1, 0.8], 0.15);
+                }
+                true
+            });
+            // Mean distance of the front from the aspiration (in objective space).
+            let f = ga.get_archive();
+            f.iter().map(|s| {
+                let v = &s.objective_fitness_values;
+                ((v[0] - 0.1).powi(2) + (v[1] - 0.1).powi(2) + (v[2] - 0.8).powi(2)).sqrt()
+            }).sum::<f64>() / f.len() as f64
+        };
+        let (uniform, focused) = (spread_of(false), spread_of(true));
+        assert!(focused < uniform * 0.7, "focused front should crowd the aspiration: {focused} vs {uniform}");
+    }
+
+    #[test]
+    fn test_archive_has_no_repeated_genomes() {
+        let problem = Arc::new(dtlz_like());
+        let mut ga = NSGAIII::new(Arc::clone(&problem), 24, 4, ExecutionMode::Sequential).with_seed(2);
+        ga.run(2_000);
+        let keys: std::collections::HashSet<_> = ga.get_archive().iter().map(|s| crate::core::GenomeKey(&s.solution)).collect();
+        assert_eq!(keys.len(), ga.get_archive().len());
     }
 }

@@ -27,20 +27,22 @@ fn callable_registry() -> &'static Mutex<HashMap<u64, Py<PyAny>>> {
     INSTANCE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn active_problem_id() -> &'static Mutex<u64> {
-    static INSTANCE: OnceLock<Mutex<u64>> = OnceLock::new();
-    INSTANCE.get_or_init(|| Mutex::new(0))
+static ACTIVE_PROBLEM_ID: AtomicU64 = AtomicU64::new(0);
+
+/// The callable registered under `id`, as a new reference. The registry lock is held only for
+/// the lookup, never across the call into Python: holding it there would order it against the
+/// GIL (deadlocking a callable that drops a `Problem`, whose `Drop` takes the same lock).
+fn registered(py: Python<'_>, registry: &Mutex<HashMap<u64, Py<PyAny>>>, id: u64) -> Option<Py<PyAny>> {
+    registry.lock().unwrap_or_else(|e| e.into_inner()).get(&id).map(|f| f.clone_ref(py))
 }
 
 /// Trampoline function matching `fn(&Vec<f64>) -> Vec<f64>`.
 /// Looks up the Python callable from the global registry and calls it via the GIL.
 fn python_objective_trampoline(input: &Vec<f64>) -> Vec<f64> {
-    let problem_id = *active_problem_id().lock().unwrap_or_else(|e| e.into_inner());
-    let registry = callable_registry().lock().unwrap_or_else(|e| e.into_inner());
-    let callable = registry
-        .get(&problem_id)
-        .expect("Python callable not found in registry — was the Problem dropped?");
-    Python::with_gil(|py| {
+    let problem_id = ACTIVE_PROBLEM_ID.load(Ordering::Relaxed);
+    Python::attach(|py| {
+        let callable = registered(py, callable_registry(), problem_id)
+            .expect("Python callable not found in registry — was the Problem dropped?");
         let py_list = pyo3::types::PyList::new(py, input).unwrap();
         let result = callable
             .call1(py, (py_list,))
@@ -53,7 +55,7 @@ fn python_objective_trampoline(input: &Vec<f64>) -> Vec<f64> {
 
 /// Set the active problem ID before a run. Called by PyNSGAII.
 pub fn set_active_problem_id(id: u64) {
-    *active_problem_id().lock().unwrap_or_else(|e| e.into_inner()) = id;
+    ACTIVE_PROBLEM_ID.store(id, Ordering::Relaxed);
 }
 
 // ---------------------------------------------------------------------------
@@ -65,20 +67,15 @@ fn batch_callable_registry() -> &'static Mutex<HashMap<u64, Py<PyAny>>> {
     INSTANCE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn active_batch_problem_id() -> &'static Mutex<u64> {
-    static INSTANCE: OnceLock<Mutex<u64>> = OnceLock::new();
-    INSTANCE.get_or_init(|| Mutex::new(0))
-}
+static ACTIVE_BATCH_PROBLEM_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Batch trampoline: calls `f(population: List[List[float]]) -> List[List[float]]`.
 /// The Python function can use multiprocessing / ProcessPoolExecutor internally.
 fn python_batch_objective_trampoline(inputs: &Vec<Vec<f64>>) -> Vec<Vec<f64>> {
-    let problem_id = *active_batch_problem_id().lock().unwrap_or_else(|e| e.into_inner());
-    let registry = batch_callable_registry().lock().unwrap_or_else(|e| e.into_inner());
-    let callable = registry
-        .get(&problem_id)
-        .expect("Python batch callable not found in registry — was the Problem dropped?");
-    Python::with_gil(|py| {
+    let problem_id = ACTIVE_BATCH_PROBLEM_ID.load(Ordering::Relaxed);
+    Python::attach(|py| {
+        let callable = registered(py, batch_callable_registry(), problem_id)
+            .expect("Python batch callable not found in registry — was the Problem dropped?");
         // Build List[List[float]]
         let py_pop = pyo3::types::PyList::new(
             py,
@@ -95,7 +92,7 @@ fn python_batch_objective_trampoline(inputs: &Vec<Vec<f64>>) -> Vec<Vec<f64>> {
 }
 
 pub fn set_active_batch_problem_id(id: u64) {
-    *active_batch_problem_id().lock().unwrap_or_else(|e| e.into_inner()) = id;
+    ACTIVE_BATCH_PROBLEM_ID.store(id, Ordering::Relaxed);
 }
 
 // ---------------------------------------------------------------------------
@@ -171,12 +168,12 @@ impl PyProblem {
         py: Python<'_>,
         solution_length: usize,
         number_of_objectives: usize,
-        solution_data_types: Vec<PyObject>,
-        objective_function: Option<PyObject>,
+        solution_data_types: Vec<Py<PyAny>>,
+        objective_function: Option<Py<PyAny>>,
         direction: Option<Vec<i8>>,
         objective_constraints: Option<Vec<Option<f64>>>,
         constraint_operands: Option<Vec<Option<String>>>,
-        batch_objective_function: Option<PyObject>,
+        batch_objective_function: Option<Py<PyAny>>,
         permutation: bool,
     ) -> PyResult<Self> {
         let data_types: Vec<SolutionDataTypes> = parse_data_types(py, solution_data_types)?;
@@ -262,6 +259,18 @@ impl PyProblem {
         self.store.problem.number_of_objectives
     }
 
+    /// Per-objective direction: -1 = minimize, 1 = maximize.
+    #[getter]
+    fn direction(&self) -> Vec<i8> {
+        direction_of(&self.store.problem)
+    }
+
+    /// Per-variable `(kind, lower_bound, upper_bound)`, kind one of "real", "integer", "binary".
+    #[getter]
+    fn variable_types(&self) -> Vec<VariableType> {
+        variable_types_of(&self.store.problem)
+    }
+
     /// True when this problem uses permutation encoding.
     #[getter]
     fn permutation(&self) -> bool {
@@ -274,6 +283,24 @@ impl PyProblem {
             self.store.problem.solution_length, self.store.problem.number_of_objectives
         )
     }
+}
+
+/// A variable's `(kind, lower_bound, upper_bound)`.
+pub(crate) type VariableType = (&'static str, Option<f64>, Option<f64>);
+
+pub(crate) fn direction_of(p: &Problem) -> Vec<i8> {
+    p.direction.clone().unwrap_or_else(|| vec![-1; p.number_of_objectives])
+}
+
+pub(crate) fn variable_types_of(p: &Problem) -> Vec<VariableType> {
+    p.solution_data_types
+        .iter()
+        .map(|t| match t {
+            SolutionDataTypes::Real(r) => ("real", r.lower_bound, r.upper_bound),
+            SolutionDataTypes::Integer(i) => ("integer", i.lower_bound.map(|v| v as f64), i.upper_bound.map(|v| v as f64)),
+            SolutionDataTypes::BitBinary(_) => ("binary", Some(0.0), Some(1.0)),
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

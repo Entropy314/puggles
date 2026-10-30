@@ -1,4 +1,6 @@
-from typing import Callable, List, Optional, Tuple, Union
+import os
+import pathlib
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 __version__: str
 
@@ -24,10 +26,20 @@ class Solution:
     constraint_violation: int
     constraint_violation_magnitude: float
 
+# callback(archive, population, nfe) -> False to stop early. A dashboard from the optional
+# add-on (`pip install "puggles[dashboard]"`) works here too: it offers a native recorder through
+# `__puggles_recorder__()`, which `run()` uses instead of calling it from Python each generation.
+GenerationCallback = Callable[[List["Solution"], List["Solution"], int], Optional[bool]]
+
 class Problem:
     solution_length: int
     number_of_objectives: int
+    direction: List[int]
+    """Per objective: -1 = minimize, 1 = maximize."""
+    variable_types: List[Tuple[str, Optional[float], Optional[float]]]
+    """Per variable: (kind, lower_bound, upper_bound); kind is "real", "integer" or "binary"."""
     permutation: bool
+    """True when the problem uses permutation encoding (``permutation=True``)."""
     def __init__(
         self,
         solution_length: int,
@@ -47,15 +59,21 @@ class GpuProblem:
     """
     Optimization problem whose objective function runs on the GPU via a WGSL compute shader.
 
-    The shader must bind:
+    Only in builds with the ``gpu`` feature (``maturin develop --release --features gpu``); the
+    PyPI wheels are CPU-only, so check ``hasattr(puggles, "GpuProblem")``.
+
+    The shader binds, in ``@group(0)``:
       @binding(0)  var<storage, read>        solutions  : array<f32>  # flat input
       @binding(1)  var<storage, read_write>  objectives : array<f32>  # flat output
       @binding(2)  var<uniform>              params     : Params       # { solution_length, num_objectives, pop_size }
+      @binding(3)  var<storage, read>        data       : array<f32>  # optional auxiliary data (empty from Python)
 
     Each invocation (global_invocation_id.x) processes one solution.
     """
     solution_length: int
     number_of_objectives: int
+    direction: List[int]
+    variable_types: List[Tuple[str, Optional[float], Optional[float]]]
     def __init__(
         self,
         solution_length: int,
@@ -67,6 +85,7 @@ class GpuProblem:
 
 class NSGAII:
     nfe: int
+    problem: Union[Problem, GpuProblem]
     def __init__(
         self,
         problem: Union[Problem, GpuProblem],
@@ -80,10 +99,9 @@ class NSGAII:
     def run(
         self,
         max_nfe: int,
-        callback: Optional[
-            Callable[[List[Solution], List[Solution], int], Optional[bool]]
-        ] = None,
-    ) -> None: ...
+        callback: Optional[GenerationCallback] = None,
+    ) -> None:
+        """Called as callback(archive, population, nfe) after each generation; return False to stop."""
     def get_archive(self) -> List[Solution]: ...
     def get_population(self) -> List[Solution]: ...
     def archive_hypervolume(self, reference: Tuple[float, float]) -> float:
@@ -119,17 +137,19 @@ class NSGAII:
 
 class NSGAIII:
     """Reference-point many-objective GA. Prefer over NSGAII for 3+ objectives.
-    Supports batch objectives and GPU evaluation."""
+    Supports batch objectives and a GpuProblem (gpu builds)."""
     nfe: int
+    problem: Union[Problem, GpuProblem]
     def __init__(
         self,
-        problem: Problem,
+        problem: Union[Problem, GpuProblem],
         population_size: int = 0,
         divisions: int = 12,
         execution_mode: str = "sequential",
         seed: Optional[int] = None,
     ) -> None: ...
-    def run(self, max_nfe: int) -> None: ...
+    def run(self, max_nfe: int, callback: Optional[GenerationCallback] = None) -> None:
+        """Called as callback(archive, population, nfe) after each generation; return False to stop."""
     def get_archive(self) -> List[Solution]: ...
     def get_population(self) -> List[Solution]: ...
 

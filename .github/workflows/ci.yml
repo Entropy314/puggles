@@ -30,8 +30,13 @@ jobs:
       # The GPU feature is compile-checked only: CI runners have no usable adapter.
       - name: Check GPU feature
         run: cargo check --features gpu --all-targets
+      # recorder-abi is the native interface the Python dashboard add-on records through.
+      - name: Test plot feature (plots, run recording, dashboard server, recorder ABI)
+        run: cargo test --features plot,recorder-abi --all-targets
+        env:
+          PUGGLES_NO_BROWSER: "1"
       - name: Clippy
-        run: cargo clippy --all-targets
+        run: cargo clippy --all-targets --features plot,recorder-abi
 
   python:
     name: python bindings
@@ -43,8 +48,10 @@ jobs:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Build and install
-        run: pip install maturin && maturin build --release --manifest-path python/Cargo.toml --out dist && pip install --find-links dist puggles
+      - name: Versions agree (crate, core wheel, dashboard add-on)
+        run: python scripts/check_versions.py
+      - name: Build and install the core wheel
+        run: pip install maturin pytest && maturin build --release --manifest-path python/Cargo.toml --out dist && pip install --find-links dist puggles
       - name: Smoke test
         run: |
           python - <<'SMOKE'
@@ -71,3 +78,13 @@ jobs:
 
           print("ok", len(front(seed=1)), "solutions; seeding verified")
           SMOKE
+      # The visual layer is an optional add-on: the core must work, and say how to get the
+      # dashboard, without it.
+      - name: Core tests (dashboard add-on not installed)
+        run: pytest python/tests -q
+      - name: Build and install the dashboard add-on
+        run: maturin build --release --manifest-path python-dashboard/Cargo.toml --out dist && pip install --find-links dist puggles-dashboard
+      - name: Dashboard add-on tests
+        run: pytest python-dashboard/tests python/tests -q
+        env:
+          PUGGLES_NO_BROWSER: "1"

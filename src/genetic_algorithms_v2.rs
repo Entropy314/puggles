@@ -1,6 +1,7 @@
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use crate::core::{EvalFn, Problem, Solution};
 use crate::genetic_operators::mutation::MutationManager;
 use crate::genetic_operators::crossover::CrossoverManager;
@@ -10,7 +11,7 @@ use rand::rngs::SmallRng;
 use rand::SeedableRng;
 
 /// Controls how fitness evaluations and population operations are parallelized.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ExecutionMode {
     /// Single-threaded execution. Best for cheap objective functions or small populations.
     Sequential,
@@ -25,6 +26,39 @@ pub enum ExecutionMode {
 impl Default for ExecutionMode {
     fn default() -> Self {
         ExecutionMode::MultiThreaded
+    }
+}
+
+/// Wall-clock seconds the last generation spent in each phase — where the time goes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct GenerationTimes {
+    /// Parent selection, crossover and mutation (plus any re-ranking they need).
+    pub variation: f64,
+    /// Objective evaluation (CPU threads, GPU, or a batch objective).
+    pub evaluation: f64,
+    /// Survival: non-dominated sorting and crowding / niching.
+    pub selection: f64,
+    /// Updating the archive of non-dominated solutions.
+    pub archive: f64,
+}
+
+/// Where an optimizer's evaluations actually run, and why that may differ from what was asked.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ExecutionInfo {
+    pub requested: ExecutionMode,
+    pub effective: ExecutionMode,
+    /// CPU threads evaluating solutions (`None` when evaluation runs on the GPU).
+    pub cpu_threads: Option<usize>,
+    /// The GPU adapter, e.g. `"NVIDIA GeForce GTX 1080 Ti (DiscreteGpu, Vulkan)"`.
+    pub device: Option<String>,
+    /// Why `effective` differs from `requested`, or other caveats.
+    pub note: Option<String>,
+}
+
+impl ExecutionInfo {
+    pub(crate) fn cpu(requested: ExecutionMode, effective: ExecutionMode, note: Option<String>) -> Self {
+        let cpu_threads = Some(if effective == ExecutionMode::Sequential { 1 } else { rayon::current_num_threads() });
+        ExecutionInfo { requested, effective, cpu_threads, device: None, note }
     }
 }
 
@@ -49,8 +83,9 @@ fn apply_batch_outputs(population: &mut [Solution], idx: &[usize], outputs: Vec<
         outputs.len(),
         idx.len()
     );
-    for (local, &global) in idx.iter().enumerate() {
-        population[global].objective_fitness_values = outputs[local].clone().into();
+    // Move each output in rather than cloning it.
+    for (&global, objectives) in idx.iter().zip(outputs) {
+        population[global].objective_fitness_values = objectives.into();
         population[global].evaluated = true;
         let cv = population[global].evaluate_constraints();
         population[global].constraint_values = cv.into();
@@ -146,6 +181,7 @@ pub struct NSGAII {
     // Per-individual rank and crowding distance (updated each iteration)
     ranks: Vec<usize>,
     crowding_distances: Vec<f64>,
+    generation_times: GenerationTimes,
     /// Optional GPU evaluator. When set and execution_mode == GPU, population evaluation
     /// is offloaded to the GPU via wgpu compute shaders.
     #[cfg(feature = "gpu")]
@@ -179,6 +215,7 @@ impl NSGAII {
             rng: SmallRng::from_entropy(),
             ranks: Vec::new(),
             crowding_distances: Vec::new(),
+            generation_times: GenerationTimes::default(),
             #[cfg(feature = "gpu")]
             gpu_evaluator: None,
         }
@@ -275,6 +312,12 @@ impl NSGAII {
     /// When the non-dominated set exceeds the cap, prune by crowding distance
     /// (drop the most crowded solutions) to keep diversity.
     pub fn update_archive(&mut self) {
+        let started = Instant::now();
+        self.update_archive_untimed();
+        self.generation_times.archive = started.elapsed().as_secs_f64();
+    }
+
+    fn update_archive_untimed(&mut self) {
         // Only population front-0 can enter the archive: any feasible non-front-0 solution is
         // dominated by a feasible rank-0 one (a feasible solution always dominates an infeasible
         // one on constraints), so nondominated(archive ∪ feasible) == nondominated(archive ∪
@@ -298,26 +341,31 @@ impl NSGAII {
         combined.extend(feasible);
 
         let fronts = fast_non_dominated_sort(&combined, &self.dominance);
-        let front0: Vec<Solution> = if !fronts.is_empty() {
-            fronts[0].iter().map(|&idx| combined[idx].clone()).collect()
-        } else {
-            Vec::new()
+        // Identical genomes never dominate each other, so without this the archive collects copies.
+        let front0 = match fronts.first() {
+            Some(f) => crate::core::first_of_each_genome(&combined, f),
+            None => Vec::new(),
         };
-
-        self.archive = if front0.len() <= self.population_size {
+        // Which of `front0` to keep, in order: all of them, or the least crowded population_size.
+        let keep: Vec<usize> = if front0.len() <= self.population_size {
             front0
         } else {
             // Trim to population_size by dropping the most crowded solutions.
-            let indices: Vec<usize> = (0..front0.len()).collect();
-            let cd = crowding_distance(&front0, &indices);
-            let mut indexed: Vec<(usize, f64)> = cd.into_iter().enumerate().collect();
+            let cd = crowding_distance(&combined, &front0);
+            let mut indexed: Vec<(usize, f64)> = front0.iter().copied().zip(cd).collect();
             // Sort descending by crowding distance (most spread-out first).
             indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            indexed[..self.population_size]
-                .iter()
-                .map(|&(i, _)| front0[i].clone())
-                .collect()
+            indexed.truncate(self.population_size);
+            indexed.into_iter().map(|(i, _)| i).collect()
         };
+        // Move the survivors out of `combined` (which we own) instead of cloning them.
+        let mut slots: Vec<Option<Solution>> = combined.into_iter().map(Some).collect();
+        self.archive = keep.into_iter().map(|i| slots[i].take().expect("unique index")).collect();
+    }
+
+    /// Move the archive out (leaving it empty), e.g. when the optimizer is about to be dropped.
+    pub fn take_archive(&mut self) -> Vec<Solution> {
+        std::mem::take(&mut self.archive)
     }
 
     pub fn get_archive(&self) -> &[Solution] {
@@ -367,10 +415,49 @@ impl NSGAII {
         self.execution_mode
     }
 
+    /// [`effective_mode`](Self::effective_mode) plus the details: CPU threads, the GPU adapter,
+    /// and the reason for any fallback.
+    pub fn execution_info(&self) -> ExecutionInfo {
+        let effective = self.effective_mode();
+        #[cfg(feature = "gpu")]
+        if effective == ExecutionMode::GPU {
+            let gpu = self.gpu_evaluator.as_ref().expect("effective GPU implies an evaluator");
+            return ExecutionInfo {
+                requested: self.execution_mode,
+                effective,
+                cpu_threads: None,
+                device: Some(gpu.device_description()),
+                note: None,
+            };
+        }
+        let note = if matches!(self.problem.eval_fn, EvalFn::Batch(_)) {
+            Some("batch objective: called once per generation on the calling thread".to_string())
+        } else if self.execution_mode == ExecutionMode::GPU {
+            Some(if cfg!(feature = "gpu") {
+                "GPU requested but no GpuEvaluator attached; evaluating on CPU threads".to_string()
+            } else {
+                "GPU requested but puggles was built without the `gpu` feature; evaluating on CPU threads".to_string()
+            })
+        } else {
+            None
+        };
+        ExecutionInfo::cpu(self.execution_mode, effective, note)
+    }
+
+    /// Solutions evaluated on the GPU so far, when a GPU evaluator is attached.
+    pub fn gpu_evaluations(&self) -> Option<usize> {
+        #[cfg(feature = "gpu")]
+        if let Some(gpu) = &self.gpu_evaluator {
+            return Some(gpu.evaluated_count());
+        }
+        None
+    }
+
     /// Run one generation, creating at most `max_offspring` new solutions.
     /// Passing `self.population_size` is equivalent to a full iteration.
     /// Used by `run()` to honour the NFE budget without overshoot.
     pub fn iterate_n(&mut self, max_offspring: usize) {
+        let started = Instant::now();
         // Ranks/crowding are refreshed by environmental_selection each generation (standard
         // NSGA-II: parent selection reuses the combined-sort ranks). Only sort here when
         // they're stale — i.e. the first iteration after initialize/load.
@@ -393,20 +480,34 @@ impl NSGAII {
             let p2 = &self.population[parent_indices[(i + 1) % np]];
             i += 2;
 
-            let children = self.crossover_manager.perform_crossover(p1, p2, &mut self.rng);
-            for child in children {
-                let mutated = self.mutation_manager.mutate(&child, &mut self.rng);
+            // Both children are mutated even when only one fits, so the RNG stream (and a seeded
+            // run) doesn't depend on where the budget ends.
+            let (c1, c2) = self.crossover_manager.perform_crossover_pair(p1, p2, &mut self.rng);
+            for child in [c1, c2] {
+                let mutated = self.mutation_manager.mutate_owned(child, &mut self.rng);
                 if offspring.len() < max_offspring {
                     offspring.push(mutated);
                 }
             }
         }
 
+        let varied = Instant::now();
         self.evaluate_population(&mut offspring);
+        let evaluated = Instant::now();
 
         let mut combined = std::mem::take(&mut self.population);
         combined.extend(offspring);
         self.population = self.environmental_selection(combined, self.population_size);
+
+        let t = &mut self.generation_times;
+        t.variation = (varied - started).as_secs_f64();
+        t.evaluation = (evaluated - varied).as_secs_f64();
+        t.selection = evaluated.elapsed().as_secs_f64();
+    }
+
+    /// Time spent in each phase of the most recent generation.
+    pub fn last_generation_times(&self) -> GenerationTimes {
+        self.generation_times
     }
 
     /// Initialize (if needed), evaluate the starting population, and archive it. Shared by
@@ -604,11 +705,21 @@ impl NSGAII {
     }
 
     pub fn run(&mut self, max_nfe: usize) {
+        self.run_with(max_nfe, |_| true);
+    }
+
+    /// `run`, calling `on_generation` after every generation (population and archive are
+    /// current). Return `false` from it to stop early. Used for live progress / dashboards.
+    /// The closure gets `&mut Self`, so it can also adjust the optimizer between generations.
+    pub fn run_with(&mut self, max_nfe: usize, mut on_generation: impl FnMut(&mut Self) -> bool) {
         self.prime();
         while self.nfe.load(Ordering::Relaxed) < max_nfe {
             let remaining = max_nfe - self.nfe.load(Ordering::Relaxed);
             self.iterate_n(remaining.min(self.population_size));
             self.update_archive();
+            if !on_generation(self) {
+                break;
+            }
         }
     }
 }
@@ -961,5 +1072,59 @@ mod tests {
         ga.run_timed(200, std::time::Duration::from_secs(60));
         assert!(ga.get_nfe() >= 200);
         assert_eq!(ga.population.len(), 20);
+    }
+
+    #[test]
+    fn test_run_with_matches_run_and_stops_early() {
+        let problem = Arc::new(setup_multi_objective_problem());
+        let front = |ga: &NSGAII| {
+            ga.get_archive().iter().map(|s| s.objective_fitness_values.clone()).collect::<Vec<_>>()
+        };
+        let mut plain = NSGAII::new(Arc::clone(&problem), 20, ExecutionMode::Sequential).with_seed(7);
+        plain.run(600);
+        let mut observed = NSGAII::new(Arc::clone(&problem), 20, ExecutionMode::Sequential).with_seed(7);
+        let mut generations = 0;
+        observed.run_with(600, |_| {
+            generations += 1;
+            true
+        });
+        assert_eq!(front(&plain), front(&observed), "observing a run must not change it");
+        assert!(generations > 0);
+
+        let mut stopped = NSGAII::new(Arc::clone(&problem), 20, ExecutionMode::Sequential);
+        stopped.run_with(1_000_000, |ga| ga.get_nfe() < 200);
+        assert!(stopped.get_nfe() < 1_000, "returning false must stop the run");
+    }
+
+    #[test]
+    fn test_execution_info_reports_fallback() {
+        let problem = Arc::new(setup_multi_objective_problem());
+        let seq = NSGAII::new(Arc::clone(&problem), 20, ExecutionMode::Sequential).execution_info();
+        assert_eq!((seq.effective, seq.cpu_threads, seq.note.is_none()), (ExecutionMode::Sequential, Some(1), true));
+
+        // GPU without an evaluator (or without the `gpu` feature) runs on CPU threads — and says why.
+        let gpu = NSGAII::new(Arc::clone(&problem), 20, ExecutionMode::GPU);
+        let info = gpu.execution_info();
+        assert_eq!(info.requested, ExecutionMode::GPU);
+        assert_eq!(info.effective, ExecutionMode::MultiThreaded);
+        assert!(info.device.is_none() && info.cpu_threads.is_some());
+        assert!(info.note.unwrap().contains("GPU requested"));
+        assert_eq!(gpu.gpu_evaluations(), None);
+    }
+
+    #[test]
+    fn test_archive_has_no_repeated_genomes() {
+        // Binary genomes make exact copies common (crossover of similar parents, no bit flipped).
+        use crate::gatypes::BitBinary;
+        fn obj(x: &Vec<f64>) -> Vec<f64> {
+            let ones: f64 = x.iter().sum();
+            vec![ones, x.len() as f64 - ones + x[0]]
+        }
+        let problem = Arc::new(Problem::new(12, 2, None, None, Some(vec![-1, -1]),
+            vec![SolutionDataTypes::BitBinary(BitBinary::new()); 12], obj));
+        let mut ga = NSGAII::new(problem, 40, ExecutionMode::Sequential).with_seed(3);
+        ga.run(4_000);
+        let keys: HashSet<_> = ga.get_archive().iter().map(|s| crate::core::GenomeKey(&s.solution)).collect();
+        assert_eq!(keys.len(), ga.get_archive().len(), "archive must not repeat a genome");
     }
 }

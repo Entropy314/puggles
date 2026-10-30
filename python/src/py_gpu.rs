@@ -52,6 +52,12 @@ fn gpu_evaluator_store() -> &'static Mutex<Option<Arc<GpuEvaluator>>> {
     INSTANCE.get_or_init(|| Mutex::new(None))
 }
 
+/// Make `evaluator` the one the trampoline uses — each run activates its own problem's shader,
+/// so several GpuProblems in one process don't evaluate with whichever was created last.
+pub(crate) fn set_active_gpu_evaluator(evaluator: Arc<GpuEvaluator>) {
+    *gpu_evaluator_store().lock().unwrap_or_else(|e| e.into_inner()) = Some(evaluator);
+}
+
 /// Batch trampoline (Rust function pointer) for GPU evaluation.
 fn gpu_batch_trampoline(inputs: &Vec<Vec<f64>>) -> Vec<Vec<f64>> {
     let guard = gpu_evaluator_store().lock().unwrap_or_else(|e| e.into_inner());
@@ -65,6 +71,7 @@ fn gpu_batch_trampoline(inputs: &Vec<Vec<f64>>) -> Vec<Vec<f64>> {
 #[pyclass(name = "GpuProblem")]
 pub struct PyGpuProblem {
     pub(crate) store: ProblemStore,
+    pub(crate) evaluator: Arc<GpuEvaluator>,
 }
 
 #[pymethods]
@@ -91,7 +98,7 @@ impl PyGpuProblem {
         py: Python<'_>,
         solution_length: usize,
         number_of_objectives: usize,
-        solution_data_types: Vec<PyObject>,
+        solution_data_types: Vec<Py<PyAny>>,
         shader_wgsl: &str,
         direction: Option<Vec<i8>>,
     ) -> PyResult<Self> {
@@ -103,7 +110,7 @@ impl PyGpuProblem {
             solution_length,
             number_of_objectives,
         ));
-        *gpu_evaluator_store().lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&evaluator));
+        set_active_gpu_evaluator(Arc::clone(&evaluator));
 
         // Placeholder single-eval function — never called; GPU uses the batch trampoline.
         fn placeholder(_: &Vec<f64>) -> Vec<f64> { Vec::new() }
@@ -122,6 +129,7 @@ impl PyGpuProblem {
         let problem_id = GPU_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
 
         Ok(PyGpuProblem {
+            evaluator,
             store: ProblemStore {
                 problem: Arc::new(problem),
                 problem_id,
@@ -140,6 +148,18 @@ impl PyGpuProblem {
     #[getter]
     fn number_of_objectives(&self) -> usize {
         self.store.problem.number_of_objectives
+    }
+
+    /// Per-objective direction: -1 = minimize, 1 = maximize.
+    #[getter]
+    fn direction(&self) -> Vec<i8> {
+        crate::py_problem::direction_of(&self.store.problem)
+    }
+
+    /// Per-variable `(kind, lower_bound, upper_bound)`, kind one of "real", "integer", "binary".
+    #[getter]
+    fn variable_types(&self) -> Vec<crate::py_problem::VariableType> {
+        crate::py_problem::variable_types_of(&self.store.problem)
     }
 
     fn __repr__(&self) -> String {

@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "puggles"
-version = "0.2.0"
+version = "0.3.0"
 description = "Fast multi-objective evolutionary optimization (NSGA-II / NSGA-III) — a Rust core with Python bindings"
 readme = "README.md"
 license = { text = "MIT OR Apache-2.0" }
@@ -24,6 +24,10 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
+[project.optional-dependencies]
+# The live browser dashboard, replay and run comparison — a separate wheel, so the core stays lean.
+dashboard = ["puggles-dashboard==0.3.0"]
+
 [project.urls]
 Homepage = "https://github.com/Entropy314/puggles"
 Repository = "https://github.com/Entropy314/puggles"
@@ -32,4 +36,6 @@ Issues = "https://github.com/Entropy314/puggles/issues"
 [tool.maturin]
 features = ["pyo3/extension-module"]
 manifest-path = "Cargo.toml"
-module-name = "puggles"
+module-name = "puggles._puggles"
+# Pure-Python modules (the lazy add-on shims) live here alongside the native extension.
+python-source = "pysrc"

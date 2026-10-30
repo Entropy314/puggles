@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>puggles dashboard</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M3 4c3 0 5 5 8 9s6 6 10 7' fill='none' stroke='%232a78d6' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="static/style.css">
+<!-- Plotly.js is the only dependency; pinned so the page never changes underneath a saved run. -->
+<script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js" charset="utf-8"></script>
+</head>
+<body>
+<header class="bar">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M3 4c3 0 5 5 8 9s6 6 10 7" fill="none" stroke="var(--s1)" stroke-width="2.4" stroke-linecap="round"/>
+      <circle cx="6" cy="7.5" r="1.8" fill="var(--accent)"/><circle cx="12.5" cy="14.6" r="1.8" fill="var(--s1)"/><circle cx="19" cy="19.3" r="1.8" fill="var(--s1)"/>
+    </svg>
+    <h1 id="title">puggles</h1>
+    <span class="tag hidden" id="algo"></span>
+  </div>
+  <div class="stats">
+    <span class="pill" id="state" data-state="connecting">connecting</span>
+    <span><b id="stat-gen">–</b> gen</span>
+    <span><b id="stat-nfe">–</b> evaluations</span>
+    <span><b id="stat-front">–</b> on front</span>
+    <span><b id="stat-time">–</b></span>
+    <span><b id="stat-rate">–</b> evals/s</span>
+    <span class="hidden" id="stat-gpu-wrap"><b id="stat-gpu">–</b> on GPU</span>
+    <span class="exec hidden" id="exec" tabindex="0"></span>
+  </div>
+  <div class="actions">
+    <button class="btn run-action hidden" id="pause" title="Hold the run after the current generation">Pause</button>
+    <button class="btn danger run-action" id="stop" disabled title="End the run after the current generation">Stop run</button>
+    <button class="btn run-action" id="compare-btn" title="Overlay saved runs (.pgrun.json or .pgrun.json.gz)">Compare runs…</button>
+    <input type="file" id="compare-file" accept=".json,.gz,application/json,application/gzip" multiple hidden>
+    <button class="btn run-action" id="download" disabled title="Save this run as a .pgrun.json file">Download run</button>
+    <button class="btn run-action" id="report" disabled title="Download a self-contained report: summary, results, chosen solutions and charts">Report</button>
+    <button class="btn icon run-action" id="notify" title="Notify me when the run finishes or plateaus" aria-pressed="false" aria-label="Notifications">
+      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2a4 4 0 0 0-4 4v3l-1.5 2h11L12 9V6a4 4 0 0 0-4-4zM6.5 13a1.5 1.5 0 0 0 3 0" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
+    </button>
+    <button class="btn icon" id="shapes" title="Shapes mode: tell runs apart by marker shape and line style, not only colour" aria-pressed="false" aria-label="Shapes mode">
+      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="4.5" cy="4.5" r="2.5" fill="none" stroke="currentColor" stroke-width="1.4"/><rect x="9" y="2" width="5" height="5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M4.5 9.5 7 14H2zM11.5 9l2.5 2.5-2.5 2.5L9 11.5z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
+    </button>
+    <button class="btn icon" id="help" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
+    <button class="btn icon" id="theme" title="Toggle light / dark" aria-label="Toggle light or dark theme">
+      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.8a6.2 6.2 0 0 1 0 12.4z" fill="currentColor"/></svg>
+    </button>
+  </div>
+</header>
+<div class="runs hidden" id="runs" aria-label="Runs shown"></div>
+
+<main>
+  <section class="card" id="obj-card" aria-label="Objective space">
+    <div class="card-head">
+      <h2>Objective space</h2>
+      <div class="controls">
+        <div class="seg" id="obj-view" role="group" aria-label="Objective view"></div>
+        <span id="axis-pickers" class="controls"></span>
+        <label class="inline" id="color-wrap">Color <select id="color-by"></select></label>
+        <label class="inline hidden" id="cmp-at-wrap">Overlay at <select id="cmp-at">
+          <option value="same">same evaluations</option><option value="final">final generation</option></select></label>
+        <label class="check" id="pop-wrap"><input type="checkbox" id="show-pop" checked> Population</label>
+        <label class="check" id="trails-wrap" title="Fade in earlier fronts to show how the front moves"><input type="checkbox" id="show-trails"> Trails</label>
+        <label class="check hidden" id="ref-wrap" title="The known true Pareto front"><input type="checkbox" id="show-ref" checked> True front</label>
+      </div>
+    </div>
+    <div class="plot" id="obj-plot"></div>
+    <div class="empty" id="obj-empty">Waiting for the first generation…</div>
+  </section>
+
+  <aside class="card" id="side" aria-label="Solutions">
+    <div class="card-head">
+      <h2>Pareto front</h2><span class="muted num" id="sol-count"></span>
+      <div class="side-actions">
+        <div class="seg" id="side-tabs" role="group" aria-label="Side panel"></div>
+        <button class="btn" id="knee-btn" disabled title="Select the most balanced trade-off: the solution whose worst objective (normalized to the front) is smallest">★ Balanced</button>
+        <button class="btn" id="export-csv" disabled title="Download the listed solutions as CSV">CSV</button>
+      </div>
+    </div>
+    <div id="front-pane" class="pane">
+      <div class="detail" id="detail"></div>
+      <div class="filter-note hidden" id="filter-note"></div>
+      <div class="table-wrap"><table id="sol-table"><thead></thead><tbody></tbody></table></div>
+    </div>
+    <div id="pins-pane" class="pane hidden"></div>
+    <div id="goals-pane" class="pane hidden"></div>
+    <div id="results-pane" class="pane hidden"></div>
+  </aside>
+
+  <section class="card" id="var-card" aria-label="Decision variables">
+    <div class="card-head">
+      <h2>Decision variables</h2>
+      <div class="controls"><div class="seg" id="var-view" role="group" aria-label="Variable view"></div></div>
+    </div>
+    <div class="plot" id="var-plot"></div>
+    <div class="empty" id="var-empty">No solutions on the front yet.</div>
+  </section>
+
+  <section class="card" id="conv-card" aria-label="Convergence">
+    <div class="card-head">
+      <h2>Convergence</h2>
+      <div class="controls">
+        <select id="conv-mode" class="hidden" aria-label="Show runs">
+          <option value="each">Each run</option><option value="group">Median by group (IQR band)</option>
+        </select>
+        <select id="metric" aria-label="Convergence metric"></select>
+      </div>
+    </div>
+    <div class="plot" id="conv-plot"></div>
+    <div class="empty" id="conv-empty">Needs two or more generations.</div>
+  </section>
+</main>
+
+<div class="figure-wrap"><div class="card"><div id="figure"></div></div></div>
+
+<footer class="scrub" id="scrubber">
+  <button class="btn icon" id="play" aria-label="Play" title="Replay generations (space)">
+    <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path id="play-icon" d="M3 1.5v11l9-5.5z" fill="currentColor"/></svg>
+  </button>
+  <input type="range" id="scrub" min="0" max="0" value="0" step="1" aria-label="Generation" disabled>
+  <span class="label" id="scrub-label">–</span>
+  <button class="btn run-action" id="live" title="Follow the newest generation">Live</button>
+</footer>
+
+<div class="sr-only" id="announce" aria-live="polite"></div>
+<div class="overlay hidden" id="help-overlay" role="dialog" aria-modal="true" aria-labelledby="help-title">
+  <div class="card help-card">
+    <div class="card-head"><h2 id="help-title">Keyboard shortcuts</h2><button class="btn" type="button" id="help-close" style="margin-left:auto">Close</button></div>
+    <dl class="keys">
+      <dt>Space</dt><dd>Play / pause the replay</dd>
+      <dt>← →</dt><dd>Previous / next generation</dd>
+      <dt>↑ ↓</dt><dd>Move through the solutions table</dd>
+      <dt>Enter</dt><dd>Select the focused row</dd>
+      <dt>P</dt><dd>Pin / unpin the selected solution</dd>
+      <dt>B</dt><dd>Select the most balanced solution</dd>
+      <dt>G</dt><dd>Open the goals panel</dd>
+      <dt>Esc</dt><dd>Clear selection and filters; close this</dd>
+      <dt>?</dt><dd>Show this list</dd>
+    </dl>
+  </div>
+</div>
+
+<script>/*PUGGLES_DATA*/</script>
+<script src="static/plot.js"></script>
+<script src="static/app.js"></script>
+</body>
+</html>

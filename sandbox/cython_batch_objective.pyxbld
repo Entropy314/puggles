@@ -1,0 +1,12 @@
+"""Build configuration used by pyximport for the OpenMP Cython module."""
+
+from setuptools.extension import Extension
+
+
+def make_ext(module_name, pyx_filename):
+    return Extension(
+        name=module_name,
+        sources=[pyx_filename],
+        extra_compile_args=["-O3", "-fopenmp"],
+        extra_link_args=["-fopenmp"],
+    )

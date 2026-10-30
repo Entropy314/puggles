@@ -31,7 +31,7 @@ use crate::py_solution::PySolution;
 #[pyo3(signature = (problem, islands = 4, population_size = 50, max_nfe_per_island = 10_000, seed = None))]
 pub fn run_island_model(
     py: Python<'_>,
-    problem: PyObject,
+    problem: Py<PyAny>,
     islands: usize,
     population_size: usize,
     max_nfe_per_island: usize,
@@ -59,6 +59,6 @@ pub fn run_island_model(
     };
 
     // No Python callable involved, so release the GIL for the whole parallel run.
-    let front = py.allow_threads(move || run_islands(core_problem, config));
+    let front = py.detach(move || run_islands(core_problem, config));
     Ok(front.iter().map(PySolution::from_core_solution).collect())
 }

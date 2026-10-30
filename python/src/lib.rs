@@ -9,11 +9,12 @@ mod py_nsga3;
 mod py_nsgaii;
 mod py_operators;
 mod py_problem;
+mod py_recorder;
 mod py_solution;
 mod py_types;
 
 #[pymodule]
-fn puggles(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _puggles(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Kept in step with Cargo.toml automatically, so it can never drift from the wheel.
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
 

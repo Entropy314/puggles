@@ -229,6 +229,34 @@ impl Problem {
     }
 }
 
+/// Exact identity of a genome, for de-duplicating: compares and hashes bit patterns (so
+/// `-0.0 != 0.0` and NaN equals itself) in place, without allocating a key per solution.
+#[derive(Clone, Copy, Debug)]
+pub struct GenomeKey<'a>(pub &'a [f64]);
+
+impl PartialEq for GenomeKey<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.len() == other.0.len() && self.0.iter().zip(other.0).all(|(a, b)| a.to_bits() == b.to_bits())
+    }
+}
+
+impl Eq for GenomeKey<'_> {}
+
+impl std::hash::Hash for GenomeKey<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write_usize(self.0.len());
+        for v in self.0 {
+            state.write_u64(v.to_bits());
+        }
+    }
+}
+
+/// Indices (in order) whose genomes haven't appeared earlier in `order`.
+pub(crate) fn first_of_each_genome(pop: &[Solution], order: &[usize]) -> Vec<usize> {
+    let mut seen = std::collections::HashSet::with_capacity(order.len());
+    order.iter().copied().filter(|&i| seen.insert(GenomeKey(&pop[i].solution))).collect()
+}
+
 #[derive(Debug, Clone)]
 pub struct Solution {
     pub problem: Arc<Problem>,

@@ -466,11 +466,21 @@ impl CrossoverManager {
         parent2: &Solution,
         rng: &mut SmallRng,
     ) -> Vec<Solution> {
+        let (child1, child2) = self.perform_crossover_pair(parent1, parent2, rng);
+        vec![child1, child2]
+    }
+
+    /// [`perform_crossover`](Self::perform_crossover) without the `Vec` allocation per pair.
+    pub fn perform_crossover_pair(
+        &self,
+        parent1: &Solution,
+        parent2: &Solution,
+        rng: &mut SmallRng,
+    ) -> (Solution, Solution) {
         // Permutation encoding: genes are not independent, so the per-type merge below would
         // produce invalid permutations. One whole-vector operator owns the pair instead.
         if parent1.problem.encoding == Encoding::Permutation {
-            let (c1, c2) = self.permutation_crossover.crossover(parent1, parent2, rng);
-            return vec![c1, c2];
+            return self.permutation_crossover.crossover(parent1, parent2, rng);
         }
 
         let types = &parent1.problem.solution_data_types;
@@ -520,7 +530,7 @@ impl CrossoverManager {
         child2.evaluated = false;
         child2.feasible = false;
 
-        vec![child1, child2]
+        (child1, child2)
     }
 }
 

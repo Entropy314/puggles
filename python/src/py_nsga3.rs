@@ -1,8 +1,10 @@
 use pyo3::prelude::*;
 use puggles::genetic_algorithms_v2::ExecutionMode;
 use puggles::nsga3::NSGAIII;
+use puggles::recorder_abi::{RecorderHandle, Snapshot};
 use std::sync::Arc;
 
+use crate::py_recorder::{gpu_snapshot, native_recorder, run_watched_with_gil, GpuEval};
 use crate::py_nsgaii::extract_store;
 use crate::py_problem::set_active_problem_id;
 use crate::py_solution::PySolution;
@@ -12,7 +14,7 @@ use crate::py_solution::PySolution;
 /// polynomial mutation); operator configs are not exposed (NSGA-III owns them privately).
 #[pyclass(name = "NSGAIII")]
 pub struct PyNSGAIII {
-    problem: PyObject,
+    problem: Py<PyAny>,
     population_size: usize,
     divisions: usize,
     execution_mode: ExecutionMode,
@@ -37,7 +39,7 @@ impl PyNSGAIII {
     ///           "multithreaded" is not deterministic even when seeded.
     #[new]
     #[pyo3(signature = (problem, population_size = 0, divisions = 12, execution_mode = "sequential", seed = None))]
-    fn new(problem: PyObject, population_size: usize, divisions: usize, execution_mode: &str, seed: Option<u64>) -> Self {
+    fn new(problem: Py<PyAny>, population_size: usize, divisions: usize, execution_mode: &str, seed: Option<u64>) -> Self {
         let mode = match execution_mode {
             "multithreaded" => ExecutionMode::MultiThreaded,
             "gpu" => ExecutionMode::GPU,
@@ -56,11 +58,23 @@ impl PyNSGAIII {
     }
 
     /// Run for up to `max_nfe` objective evaluations.
-    fn run(&mut self, py: Python<'_>, max_nfe: usize) -> PyResult<()> {
+    ///
+    /// Args:
+    ///     max_nfe: Maximum number of objective function evaluations.
+    ///     callback: Optional callable invoked after each generation.
+    ///               Signature: `(archive, population, nfe) -> bool | None`
+    ///               Return `False` to stop early. A `Dashboard` works here and is fastest.
+    #[pyo3(signature = (max_nfe, callback = None))]
+    fn run(&mut self, py: Python<'_>, max_nfe: usize, callback: Option<Py<PyAny>>) -> PyResult<()> {
         let store = extract_store(py, &self.problem)?;
         if store.uses_batch_callable {
             crate::py_problem::set_active_batch_problem_id(store.problem_id);
         }
+        #[cfg(feature = "gpu")]
+        if let Some(gpu) = &store.gpu {
+            crate::py_gpu::set_active_gpu_evaluator(Arc::clone(gpu));
+        }
+        let gpu = store.gpu.clone();
         // A Python callable re-acquires the GIL per eval → force Sequential (see PyNSGAII).
         let mode = if store.uses_python_callable || store.uses_batch_callable {
             ExecutionMode::Sequential
@@ -75,29 +89,69 @@ impl PyNSGAIII {
         let divisions = self.divisions;
         let seed = self.seed;
 
-        let (archive, population, nfe) = if store.uses_python_callable || store.uses_batch_callable {
-            // Hold the GIL: the objective trampoline calls back into Python.
+        // A dashboard add-on's callback records natively (see PyNSGAII::run).
+        let dashboard = native_recorder(py, callback.as_ref())?;
+        let callback = if dashboard.is_some() { None } else { callback };
+
+        let (archive, population, nfe) = if let Some(ref cb) = callback {
+            // Hold the GIL to call back into Python each generation. A raised exception stops
+            // the run and is re-raised once the GA has unwound.
             let mut ga = NSGAIII::new(Arc::clone(&store.problem), pop_size, divisions, mode);
             if let Some(s) = seed {
                 ga = ga.with_seed(s);
             }
-            ga.run(max_nfe);
-            (ga.get_archive().to_vec(), ga.population.clone(), ga.get_nfe())
+            let mut error: Option<PyErr> = None;
+            ga.run_with(max_nfe, |ga| {
+                let archive: Vec<PySolution> =
+                    ga.get_archive().iter().map(PySolution::from_core_solution).collect();
+                let population: Vec<PySolution> =
+                    ga.population.iter().map(PySolution::from_core_solution).collect();
+                match cb.call1(py, (archive, population, ga.get_nfe())) {
+                    Ok(result) => !matches!(result.extract::<bool>(py), Ok(false)),
+                    Err(e) => {
+                        error = Some(e);
+                        false
+                    }
+                }
+            });
+            if let Some(e) = error {
+                return Err(e);
+            }
+            (ga.take_archive(), std::mem::take(&mut ga.population), ga.get_nfe())
+        } else if store.uses_python_callable || store.uses_batch_callable {
+            // Hold the GIL: the objective (or batch) trampoline calls back into Python.
+            let mut ga = NSGAIII::new(Arc::clone(&store.problem), pop_size, divisions, mode);
+            if let Some(s) = seed {
+                ga = ga.with_seed(s);
+            }
+            match dashboard.as_ref() {
+                Some(dash) => run_watched_with_gil(
+                    py,
+                    dash,
+                    |on_gen| ga.run_with(max_nfe, |g| on_gen(g)),
+                    |g: &mut NSGAIII| {
+                        dash.apply_focus(g); // goals from the page steer NSGA-III
+                        dash.record(&gpu_snapshot(Snapshot::of_nsga3(g), &gpu))
+                    },
+                )?,
+                None => ga.run(max_nfe),
+            }
+            (ga.take_archive(), std::mem::take(&mut ga.population), ga.get_nfe())
         } else {
             // Pure-Rust objective: release the GIL for real parallelism.
             let problem = Arc::clone(&store.problem);
-            py.allow_threads(move || {
+            py.detach(move || {
                 let mut ga = NSGAIII::new(problem, pop_size, divisions, mode);
                 if let Some(s) = seed {
                     ga = ga.with_seed(s);
                 }
-                ga.run(max_nfe);
-                (ga.get_archive().to_vec(), ga.population.clone(), ga.get_nfe())
+                run_observed(&mut ga, max_nfe, dashboard.as_ref(), &gpu);
+                (ga.take_archive(), std::mem::take(&mut ga.population), ga.get_nfe())
             })
         };
 
-        self.last_archive = archive.iter().map(PySolution::from_core_solution).collect();
-        self.last_population = population.iter().map(PySolution::from_core_solution).collect();
+        self.last_archive = archive.into_iter().map(PySolution::from_owned).collect();
+        self.last_population = population.into_iter().map(PySolution::from_owned).collect();
         self.last_nfe = nfe;
         Ok(())
     }
@@ -117,10 +171,31 @@ impl PyNSGAIII {
         self.last_nfe
     }
 
+    /// The problem this optimizer was created with.
+    #[getter]
+    fn problem(&self, py: Python<'_>) -> Py<PyAny> {
+        self.problem.clone_ref(py)
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "NSGAIII(population_size={}, divisions={}, nfe={})",
             self.population_size, self.divisions, self.last_nfe
         )
+    }
+}
+
+/// `run`, recording each generation into `dashboard` when there is one (and applying goals
+/// from its page, which steer NSGA-III).
+fn run_observed(ga: &mut NSGAIII, max_nfe: usize, dashboard: Option<&RecorderHandle>, gpu: &GpuEval) {
+    match dashboard {
+        Some(dash) => {
+            ga.run_with(max_nfe, |ga| {
+                dash.apply_focus(ga);
+                dash.record_and_hold(&gpu_snapshot(Snapshot::of_nsga3(ga), gpu))
+            });
+            dash.finish();
+        }
+        None => ga.run(max_nfe),
     }
 }

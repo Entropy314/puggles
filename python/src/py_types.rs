@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use puggles::gatypes::{BitBinary, Integer, Real, SolutionDataTypes};
 
-#[pyclass(name = "Real")]
+#[pyclass(name = "Real", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyReal {
     #[pyo3(get)]
@@ -25,7 +25,7 @@ impl PyReal {
     }
 }
 
-#[pyclass(name = "Integer")]
+#[pyclass(name = "Integer", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyInteger {
     #[pyo3(get)]
@@ -49,7 +49,7 @@ impl PyInteger {
     }
 }
 
-#[pyclass(name = "BitBinary")]
+#[pyclass(name = "BitBinary", from_py_object)]
 #[derive(Clone, Debug)]
 pub struct PyBitBinary;
 
@@ -66,7 +66,7 @@ impl PyBitBinary {
 }
 
 /// Parse a Python list of Real/Integer/BitBinary objects into Rust SolutionDataTypes
-pub fn parse_data_types(py: Python<'_>, types: Vec<PyObject>) -> PyResult<Vec<SolutionDataTypes>> {
+pub fn parse_data_types(py: Python<'_>, types: Vec<Py<PyAny>>) -> PyResult<Vec<SolutionDataTypes>> {
     types
         .into_iter()
         .map(|obj| {

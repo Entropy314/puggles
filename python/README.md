@@ -5,10 +5,14 @@ Rust core. Roughly **7–8× faster than pymoo** and **20–30× faster than DEA
 equal solution quality.
 
 ```bash
-pip install puggles
+pip install puggles                  # the optimizers
+pip install "puggles[dashboard]"     # ...plus the optional live browser dashboard
 ```
 
-Prebuilt wheels for Linux, macOS, and Windows; Python 3.9+. No Rust toolchain needed.
+Prebuilt wheels for Linux, macOS, and Windows; Python 3.9+. No Rust toolchain needed. The core
+wheel has no visual code; the dashboard is a separate wheel,
+[`puggles-dashboard`](https://pypi.org/project/puggles-dashboard/), that the `[dashboard]` extra
+installs at the matching version.
 
 ## Quick start
 
@@ -54,7 +58,8 @@ against pymoo's 0.076.
 
 - **NSGA-II** and **NSGA-III** (reference-point based; prefer it for 3+ objectives)
 - **Real, Integer, and Binary** decision variables, mixable in one problem
-- **Constraints** — objective bounds and decision-variable `g(x) <= 0`
+- **Constraints** — bounds on objective values (`objective_constraints` + `constraint_operands`,
+  e.g. `[1.0]` with `["<"]`); feasible solutions always beat infeasible ones
 - **Batch objectives** — `batch_objective_function=f` evaluates a whole population per call,
   amortizing the GIL. ~1.8× on an expensive objective; a wash on a cheap one. Works with both
   `NSGAII` and `NSGAIII`.
@@ -69,9 +74,12 @@ against pymoo's 0.076.
   their fronts (native Rust objectives only; the GIL would serialize Python callables).
 - **Reproducible runs** — `seed=42` fixes the initial population, crossover, mutation, and
   selection, so a run repeats exactly. Omit it for fresh randomness each time.
-- **GPU evaluation** via `GpuProblem` and a WGSL compute shader (experimental)
+- **GPU evaluation** via `GpuProblem` and a WGSL compute shader (experimental; build from source
+  with `--features gpu` — the PyPI wheels are CPU-only)
 - **Clear errors** — invalid bounds or configuration raise `ValueError`, not a Rust panic.
 - Built-in DTLZ1–7 benchmark problems
+- **Live dashboard** (optional add-on) — `callback=pg.Dashboard(ga)` shows the evolving front,
+  variables, and convergence in the browser
 
 ### Permutation example
 
@@ -112,6 +120,29 @@ ga = pg.NSGAIII(problem, divisions=12, seed=42)   # population derived from the 
 ga.run(20_000)
 ```
 
+## Dashboard (optional add-on)
+
+`pip install "puggles[dashboard]"` adds a live browser view of a run. It shows the Pareto front
+in 2-D, 3-D, parallel coordinates or a scatter matrix, plus the decision variables, convergence
+and a sortable table of solutions. To use it, pass the dashboard as the callback:
+
+```python
+dash = pg.Dashboard(ga, objective_names=["cost", "risk"])   # opens a tab
+ga.run(20_000, callback=dash)                              # live; the page's Stop button ends the run
+dash.save("run.pgrun.json.gz")                              # replay: python -m puggles.dashboard run.pgrun.json.gz
+dash.wait()                                                 # in a script: keep the page up until Ctrl+C
+```
+
+The add-on can also pause and steer a run, compare runs and seeds, show a known true front,
+export standalone HTML, and work remotely or in Jupyter. Its
+[README](https://github.com/Entropy314/puggles/tree/master/python-dashboard#readme) covers all of
+this. It records natively, straight from the optimizer's Rust solutions, so with a built-in
+objective the run keeps its full multithreaded speed while you watch it.
+
+Without the add-on, `import puggles` never loads it. `pg.Dashboard`, `pg.show`, `pg.load` and
+`pg.reference_front` then raise an `ImportError` that gives the install command. Any other
+callable still works as `callback=`.
+
 ## Tuning operators
 
 ```python
@@ -129,7 +160,7 @@ search, not evolution.
 
 ## Status
 
-The NSGA-II core across all three encodings is well tested and benchmarked. The GPU evaluator is
+The NSGA-II and NSGA-III cores across all three encodings are well tested and benchmarked. The GPU evaluator is
 experimental and untested in CI. One Python-callable problem may be optimized at a time per
 process — concurrent GAs over different Python objectives in threads are not supported.
 
