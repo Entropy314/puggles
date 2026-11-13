@@ -8,5 +8,8 @@ edition = "2024"
 [dependencies]
 cuda_std = { git = "https://github.com/Rust-GPU/Rust-CUDA", rev = "3a82c35a7196731fb60eebdac2a40d2b1bf0ba95" }
 
+# glam is pinned to 0.30.9 (what Rust-CUDA's own Cargo.lock uses at this commit) in Cargo.lock:
+# cuda_std accepts any glam >= 0.22, and the newest (0.34) doesn't build for it.
+
 [lib]
 crate-type = ["cdylib", "rlib"]

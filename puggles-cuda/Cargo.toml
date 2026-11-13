@@ -17,4 +17,6 @@ puggles = { path = ".." }
 cust = { git = "https://github.com/Rust-GPU/Rust-CUDA", rev = "3a82c35a7196731fb60eebdac2a40d2b1bf0ba95" }
 
 [build-dependencies]
-cuda_builder = { git = "https://github.com/Rust-GPU/Rust-CUDA", rev = "3a82c35a7196731fb60eebdac2a40d2b1bf0ba95", default-features = false }
+# `rustc_codegen_nvvm`: build the codegen backend too (Rust-CUDA's own examples get it from
+# their workspace; a standalone crate has to opt in).
+cuda_builder = { git = "https://github.com/Rust-GPU/Rust-CUDA", rev = "3a82c35a7196731fb60eebdac2a40d2b1bf0ba95", default-features = false, features = ["rustc_codegen_nvvm"] }
