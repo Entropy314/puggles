@@ -1,0 +1,4 @@
+# Copied from Rust-GPU/Rust-CUDA @ 3a82c35 (rustc_codegen_nvvm needs this exact nightly).
+[toolchain]
+channel = "nightly-2026-04-02"
+components = ["clippy", "llvm-tools-preview", "rust-src", "rustc-dev", "rustfmt", "rust-analyzer"]

@@ -1,0 +1,20 @@
+# CUDA backend for puggles, with kernels written in Rust via Rust-CUDA.
+#
+# Deliberately NOT part of the puggles crate or workspace: Rust-CUDA's maintained crates are
+# git-only (crates.io refuses git dependencies) and need a pinned nightly, LLVM 7 (or 21), the
+# CUDA 12+ toolkit and Linux/Windows. Build on such a machine with: cargo build --release.
+[workspace]
+exclude = ["kernels"]
+
+[package]
+name = "puggles-cuda"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+puggles = { path = ".." }
+cust = { git = "https://github.com/Rust-GPU/Rust-CUDA", rev = "3a82c35a7196731fb60eebdac2a40d2b1bf0ba95" }
+
+[build-dependencies]
+cuda_builder = { git = "https://github.com/Rust-GPU/Rust-CUDA", rev = "3a82c35a7196731fb60eebdac2a40d2b1bf0ba95", default-features = false }
