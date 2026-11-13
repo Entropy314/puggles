@@ -449,6 +449,8 @@ def run_one(lib, size, mode, nfe, seed, prefix):
         return {**rec, "status": "timeout", "wall_s": TIMEOUT_S}
     rec["wall_s"] = time.perf_counter() - t0
     res = [l.split("\t") for l in p.stdout.splitlines() if l.startswith("RESULT")]
+    if p.returncode == 3:  # the worker found no real GPU adapter (see bench_datasets.rs)
+        return {**rec, "status": "no GPU"}
     if p.returncode != 0 or not res:
         return {**rec, "status": "error", "err": re.split(r"\s+[\d.]+ real|\tCommand being timed", p.stderr)[0][-800:]}
     _, load_ms, opt_ms, evals = res[0]
@@ -542,7 +544,7 @@ def driver(args):
     prefix = opt.get("--prefix", "real_returns_")  # "returns_" = the older synthetic files
     # --resume 1: keep finished runs from an earlier (e.g. preempted) invocation with the same --out.
     records = json.load(open(out))["records"] if opt.get("--resume") and os.path.exists(out) else []
-    finished = {(r["lib"], r["size"], r["mode"], r["seed"]) for r in records if r["status"] in ("ok", "not built")}
+    finished = {(r["lib"], r["size"], r["mode"], r["seed"]) for r in records if r["status"] in ("ok", "not built", "no GPU")}
     for size, nfe, runs in SIZES:
         if size not in sizes:
             continue
@@ -559,7 +561,7 @@ def driver(args):
                     print(f"{size:>6} {mode:<6} {lib:<17} run{run} {r['status']:<7} "
                           f"opt={fmt(r.get('opt_ms'))}ms mem={fmt(r.get('peak_mb'), 0)}MB "
                           f"{r.get('err', '')[-200:]}", flush=True)
-                    if r["status"] in ("timeout", "not built"):
+                    if r["status"] in ("timeout", "not built", "no GPU"):
                         break  # remaining runs would fail the same way
                     json.dump({"records": records}, open(out, "w"))  # checkpoint
     add_hypervolume(records)

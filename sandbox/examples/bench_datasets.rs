@@ -228,14 +228,15 @@ fn run_puggles(mode: &str, multi: bool, nfe: usize, seed: u64) -> Vec<Vec<f64>> 
         let make = || puggles::gpu_evaluator::GpuEvaluator::new_blocking_with_data(
             &shader(rows()), N, if multi { 2 } else { 1 }, &data)
             .with_partials(blocks, 2, if multi { finish_multi } else { finish_single });
-        if mode == "puggles-gpu" {
-            ga = ga.with_gpu_evaluator(make());
-        } else {
-            // Auto on a machine without a GPU adapter: run with the CPU modes only.
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(make)) {
-                Ok(ev) => ga = ga.with_gpu_evaluator(ev),
-                Err(_) => eprintln!("# no GPU adapter; Auto chooses among CPU modes"),
+        // A software renderer (llvmpipe) is not a GPU: timing it as one would be a false result.
+        let real_gpu = std::panic::catch_unwind(std::panic::AssertUnwindSafe(make)).ok().filter(|ev| !ev.is_software_renderer());
+        match (real_gpu, mode) {
+            (Some(ev), _) => ga = ga.with_gpu_evaluator(ev),
+            (None, "puggles-gpu") => {
+                eprintln!("# no GPU adapter (none, or only a software renderer)");
+                std::process::exit(3); // the driver records this as "no GPU"
             }
+            (None, _) => eprintln!("# no GPU adapter; Auto chooses among CPU modes"),
         }
     }
     #[cfg(not(feature = "gpu"))]

@@ -123,6 +123,14 @@ impl GpuEvaluator {
 
         let info = adapter.get_info();
         eprintln!("puggles: GPU = {} ({:?}, {:?})", info.name, info.device_type, info.backend);
+        if info.device_type == wgpu::DeviceType::Cpu {
+            // e.g. llvmpipe, when the machine has a GPU but no Vulkan/Metal driver for it.
+            eprintln!(
+                "puggles warning: the selected adapter is a CPU software renderer ({}), not a GPU; \
+                 GPU-mode timings will not reflect real GPU hardware.",
+                info.name
+            );
+        }
 
         let (device, queue) = adapter
             // Adapter limits, not wgpu's 128 MiB default, so large datasets can bind at binding 3.
@@ -233,6 +241,11 @@ impl GpuEvaluator {
     /// The adapter in use (name, vendor, device type, backend, driver).
     pub fn adapter_info(&self) -> &wgpu::AdapterInfo {
         &self.adapter
+    }
+
+    /// True when the adapter is a CPU software renderer (e.g. llvmpipe), not real GPU hardware.
+    pub fn is_software_renderer(&self) -> bool {
+        self.adapter.device_type == wgpu::DeviceType::Cpu
     }
 
     /// `"<name> (<device type>, <backend>)"`, as printed when the evaluator starts.
