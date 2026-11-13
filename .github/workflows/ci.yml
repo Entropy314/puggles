@@ -51,7 +51,8 @@ jobs:
       - name: Versions agree (crate, core wheel, dashboard add-on)
         run: python scripts/check_versions.py
       - name: Build and install the core wheel
-        run: pip install maturin pytest && maturin build --release --manifest-path python/Cargo.toml --out dist && pip install --find-links dist puggles
+        # numpy + numba so the batch_numpy and objective_cfunc tests run instead of skipping.
+        run: pip install maturin pytest numpy numba && maturin build --release --manifest-path python/Cargo.toml --out dist && pip install --find-links dist puggles
       - name: Smoke test
         run: |
           python - <<'SMOKE'

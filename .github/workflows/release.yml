@@ -100,6 +100,21 @@ jobs:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --manifest-path ${{ matrix.package }}/Cargo.toml
           manylinux: auto
+      # A wheel can build fine and still fail to load (a macOS 27 linker bug once produced one
+      # that dlopen rejected), so import the core wheel wherever the runner can execute it.
+      - name: Import-test the wheel (native targets)
+        if: >-
+          matrix.package == 'python' && (
+            (matrix.platform.os == 'ubuntu-latest' && matrix.platform.target == 'x86_64') ||
+            (matrix.platform.os == 'macos-latest' && matrix.platform.target == 'aarch64') ||
+            matrix.platform.os == 'windows-latest')
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/wheeltest"
+          PY="$RUNNER_TEMP/wheeltest/bin/python"
+          [ -f "$PY" ] || PY="$RUNNER_TEMP/wheeltest/Scripts/python.exe"
+          "$PY" -m pip install --no-index --find-links dist puggles
+          "$PY" -c "import puggles as pg; pg.NSGAII(pg.Problem(1, 1, [pg.Real(0.0, 1.0)], objective_function=lambda x: [x[0]]), population_size=4).run(20); print('wheel loads and runs')"
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.package }}-${{ matrix.platform.os }}-${{ matrix.platform.target }}
