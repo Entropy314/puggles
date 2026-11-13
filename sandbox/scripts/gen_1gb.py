@@ -2,15 +2,18 @@
 """Fast numpy generator for a ~1 GB returns CSV (20 assets, single-factor model).
 
 Matches the schema of returns_{1,10,100}mb.csv: `date` + A00..A19 columns.
-Written in row chunks to keep memory bounded. Run:  python3 scripts/gen_1gb.py
+Written in row chunks to keep memory bounded. Run:  python3 scripts/gen_1gb.py [label rows]
+(default `1gb 5600000`; e.g. `100mb 549000` for the 100 MB file).
 """
 import os
+import sys
 import time
 import numpy as np
 
 N_ASSETS = 20
 SEED = 42
-TARGET_ROWS = 5_600_000          # ~191 bytes/row → ~1.07 GB
+LABEL = sys.argv[1] if len(sys.argv) > 1 else "1gb"
+TARGET_ROWS = int(sys.argv[2]) if len(sys.argv) > 2 else 5_600_000  # ~191 bytes/row → ~1.07 GB
 CHUNK = 200_000
 
 rng = np.random.default_rng(SEED)
@@ -19,7 +22,7 @@ stds = rng.uniform(0.008, 0.025, N_ASSETS)
 betas = rng.uniform(0.5, 1.5, N_ASSETS)
 
 data_dir = os.path.join(os.path.dirname(__file__), "..", "data")
-path = os.path.join(data_dir, "returns_1gb.csv")
+path = os.path.join(data_dir, f"returns_{LABEL}.csv")
 header = "date," + ",".join(f"A{i:02d}" for i in range(N_ASSETS)) + "\n"
 
 t0 = time.perf_counter()

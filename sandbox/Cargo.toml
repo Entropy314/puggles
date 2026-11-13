@@ -7,6 +7,7 @@ edition = "2021"
 
 [features]
 gpu = ["puggles/gpu"]
+cubecl = ["dep:cubecl"]
 
 [dependencies]
 puggles = { path = ".." }
@@ -15,6 +16,8 @@ sysinfo  = { version = "0.33", default-features = false, features = ["system"] }
 # Single-objective Rust GA libraries, for the §7 cross-library comparison (bench_singleobj).
 genevo            = "0.7"
 genetic_algorithm = "0.27"
+# CubeCL feasibility check (bench_cubecl): GPU kernels written in Rust, run through wgpu/Metal.
+cubecl = { version = "0.10", features = ["wgpu"], optional = true }
 
 # Benchmarks build from this workspace, so the release profile is set here (a path
 # dependency inherits the profile of the workspace being built, not its own).

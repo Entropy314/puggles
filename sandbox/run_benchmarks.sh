@@ -13,7 +13,7 @@
 #   cd sandbox/
 #   bash run_benchmarks.sh
 #
-# Python deps: pip install platypus-opt pymoo deap polars pandas numpy
+# Python deps: pip install platypus-opt pymoo deap polars pandas numpy numba
 # puggles Python bindings:
 #   source .venv/bin/activate
 #   cd ../python && PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 maturin develop --release
@@ -84,3 +84,14 @@ echo "  · polars-py is 9× faster than pandas at 100 MB; use polars for large C
 echo "  · puggles native cov is a serial Rust loop — slower than numpy BLAS at 100 MB."
 echo "  · Optimisation time is flat across dataset sizes: complexity = f(N_ASSETS, NFE), not rows."
 echo "  · platypus and DEAP evaluate one solution at a time; 8–9× slower than puggles on opt."
+
+# ══════════════════════════════════════════════════════════════════════════════
+echo ""
+echo "╔══════════════════════════════════════════════════════════════════════════╗"
+echo "║  BENCHMARK 3 — Dataset scaling 1 KB → 1 GB (every eval scans all rows)  ║"
+echo "║  single + multi-objective · CPU/GPU · 10 libraries → benchmarks_datasets.md ║"
+echo "╚══════════════════════════════════════════════════════════════════════════╝"
+# Real daily prices (Yahoo, cached in data/raw) → real_returns_{1kb..1gb}.csv (block-bootstrapped beyond the real history)
+[ -f data/real_returns_1gb.csv ] || "$PYTHON" -I scripts/build_real_datasets.py data/raw
+cargo build --release --features gpu,cubecl --example bench_datasets --example bench_cubecl -q 2>/dev/null
+"$PYTHON" bench_datasets.py   # → results_datasets.json + markdown tables (--prefix returns_ for the synthetic files)

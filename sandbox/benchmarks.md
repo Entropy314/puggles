@@ -56,6 +56,12 @@ cargo run --release --example bench_tsp                        # §5b (TSP/permu
    - [5b. TSP (permutation-encoded)](#5b-permutation-encoding--travelling-salesman)
 6. [Bugs Fixed During Benchmarking](#6-bugs-fixed-during-benchmarking)
 7. [Summary and Guidance](#7-summary-and-guidance)
+8. [Dataset Scaling and Faster Evaluation Paths (Nov 2026)](#8-dataset-scaling-and-faster-evaluation-paths-nov-2026)
+
+> **Update (Nov 2026):** §8 summarizes a new benchmark on real stock data from 1 KB to 1 GB, where every
+> evaluation scans the full dataset, against all five other libraries. It also covers the new evaluation paths
+> (map-reduce GPU kernel, NumPy array hand-off, GIL-free Numba callbacks, PyTorch/JAX, CubeCL, CUDA).
+> Details: [`benchmarks_datasets.md`](benchmarks_datasets.md); what changed and why: [`performance_changes.md`](performance_changes.md).
 
 ---
 
@@ -122,7 +128,7 @@ Two crossovers as the objective gets heavier: CPU **parallel** pulls further ahe
 
 (Re-measured after the §5 sort optimization. The lighter CPU paths shift the picture slightly vs the earlier report: at the cheap/light end the GPU looks relatively *worse* — the CPU got faster while GPU upload/dispatch/readback latency is fixed — but once evaluation dominates (medium and up) the GPU wins by a wider margin, since the run is now bounded by the objective, exactly what the GPU accelerates.)
 
-**GPU + data-driven objectives:** `GpuEvaluator::new_blocking_with_data(...)` now uploads read-only data bound at `@group(0) @binding(3)`, so a data-driven objective (e.g. the §3 portfolio's 20×20 covariance) *can* run on the GPU — though for that tiny objective the CPU still wins (per §2b, GPU only pays off once per-evaluation compute is large).
+**GPU + data-driven objectives:** `GpuEvaluator::new_blocking_with_data(...)` now uploads read-only data bound at `@group(0) @binding(3)`, so a data-driven objective (e.g. the §3 portfolio's 20×20 covariance) *can* run on the GPU — though for that tiny objective the CPU still wins (per §2b, GPU only pays off once per-evaluation compute is large). For objectives that **scan a large dataset**, use the map-reduce mode `GpuEvaluator::with_partials` (§8). It reads the data once per generation for all solutions and is 8.8× faster than pymoo at 1 GB.
 
 **Threshold rule:** use `ExecutionMode::MultiThreaded` when evaluation exceeds ~100 µs; below that, Rayon overhead erases the benefit. Reach for GPU only when per-evaluation compute is large *and* readback is amortized.
 
@@ -433,10 +439,13 @@ is everything.
 | eval < ~100 µs (e.g. ZDT1, 20-asset portfolio) | `Sequential` | Rayon/GPU overhead exceeds the work |
 | eval > ~100 µs (expensive simulation) | `MultiThreaded` | ~2.2× on 8 cores here (up to ~4.5× for heavier evals); Python's GIL can't compete |
 | eval very heavy *and* self-contained | `GPU` (`--features gpu`) | wins once compute amortizes per-generation readback |
+| objective scans a large dataset (≳ 10 MB) | `GPU` + `GpuEvaluator::with_partials` (map-reduce) | reads the data once per generation for all solutions; 1.5 s vs pymoo's 13.5 s at 1 GB (§8) |
+| Python objective that can be vectorized | `batch_objective_function` + `batch_numpy=True` (NumPy, Numba, PyTorch or JAX inside) | one call per generation; arrays instead of lists (§8) |
+| Python per-solution objective that can't be batched | `objective_cfunc` (Numba `@cfunc`) + `"multithreaded"` | runs from Rust without the GIL on all cores, about native-Rust speed (§8) |
 
 ### Dataset size vs. work
 
-Scaling the dataset 100× changes **preprocessing** time but leaves **optimization** time flat (±3%) — the optimizer only ever sees a 20×20 covariance. Investing in a faster optimizer (puggles over platypus: ~38×) pays off equally at every dataset size.
+Scaling the dataset 100× changes **preprocessing** time but leaves **optimization** time flat (±3%) — the optimizer only ever sees a 20×20 covariance. Investing in a faster optimizer (puggles over platypus: ~63×, §3b) pays off equally at every dataset size. That holds only for this covariance formulation. When the objective itself scans the data, evaluation cost grows with dataset size, and the evaluation path matters more than the optimizer (§8).
 
 ### Standard NSGA-II operator defaults (applied by `NSGAII::new()`)
 
@@ -445,3 +454,36 @@ Scaling the dataset 100× changes **preprocessing** time but leaves **optimizati
 | `PolynomialMutation` | probability / η | `1/N` / 20 |
 | `SimulatedBinaryCrossover` | probability / η | 1.0 / 20 |
 | Archive | max size | `population_size` |
+
+---
+
+## 8. Dataset Scaling and Faster Evaluation Paths (Nov 2026)
+
+A second large-data benchmark, written up in full in [`benchmarks_datasets.md`](benchmarks_datasets.md). The changes behind it, and why they're faster, are in [`performance_changes.md`](performance_changes.md).
+
+**What's different from §3:**
+- **The objective reads the data.** Every evaluation scans every row of the returns matrix: minimize variance and maximize mean return (multi-objective), or maximize Sharpe (single-objective). Evaluation cost therefore grows with dataset size.
+- **The data is real.** Daily returns for 20 US large caps, 1986–2026, from Yahoo Finance, block-bootstrapped up to 1 GB (5.6M rows).
+- **Same budget for everyone.** Every library gets the same evaluation count. Each run is its own process, and memory is measured as peak footprint.
+- **Hardware is the same as above:** Apple M3, 8 CPU cores, 10-core GPU, 16 GB.
+
+**Fastest puggles mode against every other library.** Each "vs" column is how many times slower that library was than the puggles mode on the left. Below 1× means that library was faster.
+
+| size | fastest puggles (multi) | vs pymoo | vs pymoo + Numba | vs platypus | vs DEAP | fastest puggles (single) | vs genevo | vs genetic_algorithm |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 KB | sequential, 19 ms | 17.9× | 15.9× | 56.6× | 44.5× | sequential, 9 ms | 0.6× | 0.3× |
+| 1 MB | Python + JAX, 48 ms | 7.9× | 7.2× | 30.8× | 25.3× | Python + JAX, 38 ms | 6.1× | 5.5× |
+| 10 MB | GPU, 202 ms | 5.1× | 3.4× | 23.4× | 21.5× | GPU, 187 ms | 7.7× | 10.6× |
+| 100 MB | CubeCL GPU, 146 ms | 10.5× | 5.7× | 65.5× | 64.5× | GPU, 128 ms | 24.7× | 31.9× |
+| 1 GB | GPU, 1.52 s | 8.8× | 5.1× | 62.1× | 62.1× | GPU, 1.59 s | 22.0× | 27.8× |
+
+**Takeaways:**
+1. **puggles is the fastest library from 1 MB up**, in both modes. At 1 KB single-objective, genevo and genetic_algorithm are faster: with 5 rows evaluation is nearly free, and their single-objective loops are lighter than NSGA-II.
+2. **On large data, the evaluation path decides the result.** The map-reduce GPU kernel went from 6.6 s to 1.5 s at 1 GB by reading the data once per generation instead of once per solution. Native 8-thread puggles (18.6 s) still loses to pymoo's vectorized batch (13.5 s), because per-solution evaluation is limited by memory bandwidth.
+3. **Python users get most of this without writing Rust:**
+   - batch objectives with NumPy arrays (`batch_numpy=True`): about 1.3× less overhead on small data,
+   - Numba, PyTorch-on-MPS or JAX inside the batch objective: 1.8–3.2× faster than pymoo at 1 GB,
+   - GIL-free Numba `@cfunc` per-solution objectives: within about 15% of native Rust threads.
+4. **Quality is comparable.** No library has the best Pareto front at every size; pymoo and platypus lead at 1 GB (HV 0.702 vs puggles' 0.668, a single run). Single-objective Sharpe agrees within about 1%, except genevo, which is lowest.
+5. **Memory.** Native puggles uses 5–36 MB up to 10 MB of data, against 53–141 MB for the Python libraries. At 1 GB the dataset dominates every library (2.7–2.9 GB). The GPU path adds about 1.8 GB for its device copy.
+6. **Not yet measured:** the CUDA backend with Rust kernels ([`../puggles-cuda/`](../puggles-cuda/)) is written but not built. It needs Linux and an NVIDIA GPU.
