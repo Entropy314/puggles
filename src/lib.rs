@@ -7,6 +7,7 @@ pub mod core;
 pub mod dominance;
 pub mod metrics;
 pub mod checkpoint;
+pub mod row_scan;
 pub mod islands;
 pub mod genetic_operators;
 

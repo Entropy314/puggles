@@ -137,6 +137,7 @@ pub fn mode_code(mode: ExecutionMode) -> u8 {
         ExecutionMode::Sequential => 0,
         ExecutionMode::MultiThreaded => 1,
         ExecutionMode::GPU => 2,
+        ExecutionMode::Auto => 3,
     }
 }
 
@@ -144,6 +145,7 @@ fn mode_from_code(code: u8) -> ExecutionMode {
     match code {
         0 => ExecutionMode::Sequential,
         2 => ExecutionMode::GPU,
+        3 => ExecutionMode::Auto,
         _ => ExecutionMode::MultiThreaded,
     }
 }

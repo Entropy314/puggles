@@ -96,7 +96,8 @@ impl PyNSGAII {
     /// Args:
     ///     problem: The Problem or GpuProblem to optimize.
     ///     population_size: Number of individuals per generation (default 100).
-    ///     execution_mode: "sequential", "multithreaded", or "gpu" (default "sequential").
+    ///     execution_mode: "sequential", "multithreaded", "gpu", or "auto" (default "sequential").
+    ///                     "auto" times a few evaluations and picks the fastest of the others.
     ///                     A Python-callable objective always runs Sequential (the GIL
     ///                     serialises evaluations; parallel would only deadlock).
     ///     crossover_config: Optional CrossoverConfig to customise crossover operators.
@@ -129,6 +130,7 @@ impl PyNSGAII {
         let mode = match execution_mode {
             "multithreaded" => ExecutionMode::MultiThreaded,
             "gpu" => ExecutionMode::GPU,
+            "auto" => ExecutionMode::Auto,
             _ => ExecutionMode::Sequential,
         };
         PyNSGAII {

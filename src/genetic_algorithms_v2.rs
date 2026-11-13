@@ -19,8 +19,13 @@ pub enum ExecutionMode {
     /// Good default for most workloads.
     MultiThreaded,
     /// GPU-accelerated evaluation (requires objective function compiled to GPU kernel).
-    /// Falls back to MultiThreaded if GPU is unavailable.
+    /// Falls back to MultiThreaded if GPU is unavailable. More generally: evaluate through the
+    /// attached device/batch evaluator (`with_gpu_evaluator` / `with_batch_evaluator`).
     GPU,
+    /// Pick the fastest of the above on the first evaluation: a few real evaluations are timed
+    /// sequentially (and the attached device evaluator once, if any) and the cheapest projected
+    /// per-generation cost wins. The choice is reported by `execution_info()`.
+    Auto,
 }
 
 impl Default for ExecutionMode {
@@ -96,6 +101,90 @@ fn apply_batch_outputs(population: &mut [Solution], idx: &[usize], outputs: Vec<
     }
 }
 
+/// Rayon's per-generation fork/join cost, used by `Auto` to discount the threaded projection.
+// ponytail: a fixed constant measured on an M3; calibrate per machine if Auto picks threads too eagerly.
+const PAR_OVERHEAD_S: f64 = 50e-6;
+
+/// The `Auto` probe: evaluate up to 8 unevaluated solutions sequentially to time the CPU
+/// objective, and (if a device evaluator is attached) run it on the rest, timing its second call
+/// so one-time warm-up isn't charged to it. Returns the chosen mode, the evaluations spent, and a
+/// note for `execution_info()`; `None` when there's nothing to evaluate yet.
+fn probe_auto(
+    population: &mut [Solution],
+    problem: &Problem,
+    device: Option<&dyn crate::core::BatchEvaluator>,
+) -> Option<(ExecutionMode, usize, String)> {
+    if matches!(problem.eval_fn, EvalFn::Batch(_)) {
+        return Some((ExecutionMode::Sequential, 0, "auto: batch objective, called once per generation".into()));
+    }
+    let idx = unevaluated_indices(population);
+    if idx.is_empty() {
+        return None;
+    }
+    let (pop, k) = (idx.len(), idx.len().min(8));
+    let t0 = Instant::now();
+    for &i in &idx[..k] {
+        population[i].evaluate();
+    }
+    let per_eval = t0.elapsed().as_secs_f64() / k as f64;
+    let threads = rayon::current_num_threads() as f64;
+    let seq = per_eval * pop as f64;
+    let par = seq / threads + PAR_OVERHEAD_S;
+    let mut best = if threads > 1.0 && par < seq {
+        (ExecutionMode::MultiThreaded, par)
+    } else {
+        (ExecutionMode::Sequential, seq)
+    };
+    let mut spent = k;
+    let mut device_note = String::new();
+    if let (Some(dev), true) = (device, pop > k) {
+        let rest = &idx[k..];
+        let inputs: Vec<Vec<f64>> = rest.iter().map(|&i| population[i].solution.clone()).collect();
+        let out = dev.evaluate_batch(&inputs);
+        let t1 = Instant::now();
+        let _ = dev.evaluate_batch(&inputs); // timed second call: excludes first-dispatch warm-up
+        let t_dev = t1.elapsed().as_secs_f64();
+        apply_batch_outputs(population, rest, out);
+        spent += rest.len();
+        device_note = format!(", {:.2} ms per batch on {}", t_dev * 1e3, dev.device_description());
+        if t_dev < best.1 {
+            best = (ExecutionMode::GPU, t_dev);
+        }
+    }
+    let note = format!("auto: {:.1} µs/eval on the CPU{device_note} -> {:?}", per_eval * 1e6, best.0);
+    Some((best.0, spent, note))
+}
+
+/// Resolve `Auto` (once per algorithm instance) and evaluate. Shared by NSGA-II and NSGA-III.
+pub(crate) fn evaluate_routed(
+    population: &mut Vec<Solution>,
+    problem: &Problem,
+    requested: ExecutionMode,
+    device: Option<&dyn crate::core::BatchEvaluator>,
+    auto: &std::sync::OnceLock<(ExecutionMode, String)>,
+) -> usize {
+    let mut spent = 0;
+    let mode = match (requested, auto.get()) {
+        (ExecutionMode::Auto, Some((m, _))) => *m,
+        (ExecutionMode::Auto, None) => match probe_auto(population, problem, device) {
+            Some((m, n, note)) => {
+                spent = n;
+                let _ = auto.set((m, note));
+                m
+            }
+            None => ExecutionMode::Sequential,
+        },
+        (m, _) => m,
+    };
+    spent + match device {
+        Some(dev) => {
+            let run = |inputs: &Vec<Vec<f64>>| dev.evaluate_batch(inputs);
+            evaluate_population_shared(population, problem, mode, Some(&run))
+        }
+        None => evaluate_population_shared(population, problem, mode, None),
+    }
+}
+
 /// Population evaluation shared by NSGA-II and NSGA-III.
 ///
 /// Routes to the batch objective, the GPU, or per-solution evaluation (sequential or Rayon),
@@ -145,7 +234,8 @@ pub(crate) fn evaluate_population_shared(
 
     // Single-evaluation path (Sequential or Rayon-parallel).
     match execution_mode {
-        ExecutionMode::Sequential => population
+        // Auto is resolved by `evaluate_routed` before it reaches here.
+        ExecutionMode::Sequential | ExecutionMode::Auto => population
             .iter_mut()
             .filter(|s| !s.evaluated)
             .map(|s| {
@@ -189,6 +279,8 @@ pub struct NSGAII {
     /// Any other device evaluator (CUDA, CubeCL, ...), attached via `with_batch_evaluator()`.
     /// Takes precedence over `gpu_evaluator`.
     pub batch_evaluator: Option<Box<dyn crate::core::BatchEvaluator>>,
+    /// The mode `ExecutionMode::Auto` resolved to, and why (set on the first evaluation).
+    auto_mode: std::sync::OnceLock<(ExecutionMode, String)>,
 }
 
 impl NSGAII {
@@ -222,6 +314,7 @@ impl NSGAII {
             #[cfg(feature = "gpu")]
             gpu_evaluator: None,
             batch_evaluator: None,
+            auto_mode: std::sync::OnceLock::new(),
         }
     }
 
@@ -428,11 +521,24 @@ impl NSGAII {
         if matches!(self.problem.eval_fn, EvalFn::Batch(_)) {
             return ExecutionMode::Sequential;
         }
-        if self.execution_mode == ExecutionMode::GPU {
+        let requested = match self.execution_mode {
+            ExecutionMode::Auto => self.auto_mode.get().map_or(ExecutionMode::Sequential, |(m, _)| *m),
+            m => m,
+        };
+        if requested == ExecutionMode::GPU {
             let gpu_ready = self.device_evaluator().is_some();
             return if gpu_ready { ExecutionMode::GPU } else { ExecutionMode::MultiThreaded };
         }
-        self.execution_mode
+        requested
+    }
+
+    /// What `Auto` chose and why, or that it hasn't run yet; `None` for an explicit mode.
+    fn auto_note(&self) -> Option<String> {
+        (self.execution_mode == ExecutionMode::Auto).then(|| {
+            self.auto_mode
+                .get()
+                .map_or("auto: resolves on the first evaluation".to_string(), |(_, note)| note.clone())
+        })
     }
 
     /// [`effective_mode`](Self::effective_mode) plus the details: CPU threads, the GPU adapter,
@@ -446,7 +552,7 @@ impl NSGAII {
                 effective,
                 cpu_threads: None,
                 device: Some(gpu.device_description()),
-                note: None,
+                note: self.auto_note(),
             };
         }
         let note = if matches!(self.problem.eval_fn, EvalFn::Batch(_)) {
@@ -460,7 +566,7 @@ impl NSGAII {
         } else {
             None
         };
-        ExecutionInfo::cpu(self.execution_mode, effective, note)
+        ExecutionInfo::cpu(self.execution_mode, effective, self.auto_note().or(note))
     }
 
     /// Solutions evaluated on the GPU so far, when a GPU evaluator is attached.
@@ -697,20 +803,7 @@ impl NSGAII {
     }
 
     pub fn evaluate_population(&mut self, population: &mut Vec<Solution>) {
-        {
-            if let Some(gpu) = self.device_evaluator() {
-                let run_gpu = |inputs: &Vec<Vec<f64>>| gpu.evaluate_batch(inputs);
-                let n = evaluate_population_shared(
-                    population,
-                    &self.problem,
-                    self.execution_mode,
-                    Some(&run_gpu),
-                );
-                self.nfe.fetch_add(n, Ordering::Relaxed);
-                return;
-            }
-        }
-        let n = evaluate_population_shared(population, &self.problem, self.execution_mode, None);
+        let n = evaluate_routed(population, &self.problem, self.execution_mode, self.device_evaluator(), &self.auto_mode);
         self.nfe.fetch_add(n, Ordering::Relaxed);
     }
 
@@ -1028,6 +1121,52 @@ mod tests {
         ga.run(1000);
         assert_eq!(ga.gpu_evaluations(), Some(ga.get_nfe()), "every evaluation went through the evaluator");
         assert!(!ga.archive.is_empty());
+    }
+
+    #[test]
+    fn test_auto_mode_picks_the_cheapest_path() {
+        // Cheap objective: thread fork/join costs more than the work → Sequential.
+        let mut cheap = NSGAII::new(Arc::new(setup_multi_objective_problem()), 16, ExecutionMode::Auto);
+        assert!(cheap.execution_info().note.unwrap().contains("first evaluation"));
+        cheap.run(200);
+        assert_eq!(cheap.effective_mode(), ExecutionMode::Sequential);
+        assert_eq!(cheap.get_nfe(), 200, "the probe's evaluations count toward the budget");
+
+        // Expensive objective (~0.1-1 ms/eval): threads win when there is more than one core.
+        let mut slow_problem = setup_multi_objective_problem();
+        slow_problem.eval_fn = EvalFn::Single(|x| {
+            let mut a = 0.0f64;
+            for i in 0..200_000 {
+                a += (x[0].abs() + i as f64).sqrt();
+            }
+            vec![a, -a]
+        });
+        let slow_problem = Arc::new(slow_problem);
+        let mut slow = NSGAII::new(Arc::clone(&slow_problem), 16, ExecutionMode::Auto);
+        slow.run(32);
+        if rayon::current_num_threads() > 1 {
+            assert_eq!(slow.effective_mode(), ExecutionMode::MultiThreaded);
+        }
+
+        // A device evaluator that is far cheaper than the CPU objective wins.
+        struct Instant0(AtomicUsize);
+        impl crate::core::BatchEvaluator for Instant0 {
+            fn evaluate_batch(&self, solutions: &[Vec<f64>]) -> Vec<Vec<f64>> {
+                self.0.fetch_add(solutions.len(), Ordering::Relaxed);
+                vec![vec![0.0, 0.0]; solutions.len()]
+            }
+            fn device_description(&self) -> String {
+                "instant".into()
+            }
+            fn evaluated_count(&self) -> usize {
+                self.0.load(Ordering::Relaxed)
+            }
+        }
+        let mut dev = NSGAII::new(slow_problem, 16, ExecutionMode::Auto)
+            .with_batch_evaluator(Instant0(AtomicUsize::new(0)));
+        dev.run(32);
+        assert_eq!(dev.effective_mode(), ExecutionMode::GPU);
+        assert!(dev.execution_info().note.unwrap().contains("instant"));
     }
 
     #[test]

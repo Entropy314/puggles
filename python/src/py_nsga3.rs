@@ -43,6 +43,7 @@ impl PyNSGAIII {
         let mode = match execution_mode {
             "multithreaded" => ExecutionMode::MultiThreaded,
             "gpu" => ExecutionMode::GPU,
+            "auto" => ExecutionMode::Auto,
             _ => ExecutionMode::Sequential,
         };
         PyNSGAIII {

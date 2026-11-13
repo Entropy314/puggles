@@ -12,7 +12,7 @@
 
 use crate::core::{EvalFn, Problem, Solution};
 use crate::dominance::{crowding_distance, fast_non_dominated_sort, ParetoDominance};
-use crate::genetic_algorithms_v2::{evaluate_population_shared, ExecutionInfo, ExecutionMode, GenerationTimes};
+use crate::genetic_algorithms_v2::{evaluate_routed, ExecutionInfo, ExecutionMode, GenerationTimes};
 use crate::genetic_operators::crossover::CrossoverManager;
 use crate::genetic_operators::mutation::MutationManager;
 use crate::genetic_operators::selectors::CrowdingTournamentSelector;
@@ -76,6 +76,8 @@ pub struct NSGAIII {
     /// Any other device evaluator (CUDA, CubeCL, ...), attached via `with_batch_evaluator()`.
     /// Takes precedence over `gpu_evaluator`.
     pub batch_evaluator: Option<Box<dyn crate::core::BatchEvaluator>>,
+    /// The mode `ExecutionMode::Auto` resolved to, and why (set on the first evaluation).
+    auto_mode: std::sync::OnceLock<(ExecutionMode, String)>,
 }
 
 impl NSGAIII {
@@ -118,6 +120,7 @@ impl NSGAIII {
             #[cfg(feature = "gpu")]
             gpu_evaluator: None,
             batch_evaluator: None,
+            auto_mode: std::sync::OnceLock::new(),
         }
     }
 
@@ -242,7 +245,7 @@ impl NSGAIII {
                 effective,
                 cpu_threads: None,
                 device: Some(gpu.device_description()),
-                note: None,
+                note: self.auto_note(),
             };
         }
         let note = if matches!(self.problem.eval_fn, EvalFn::Batch(_)) {
@@ -256,7 +259,7 @@ impl NSGAIII {
         } else {
             None
         };
-        ExecutionInfo::cpu(self.execution_mode, effective, note)
+        ExecutionInfo::cpu(self.execution_mode, effective, self.auto_note().or(note))
     }
 
     /// The path evaluation will actually take: a batch objective runs once per generation on
@@ -265,11 +268,24 @@ impl NSGAIII {
         if matches!(self.problem.eval_fn, EvalFn::Batch(_)) {
             return ExecutionMode::Sequential;
         }
-        if self.execution_mode == ExecutionMode::GPU {
+        let requested = match self.execution_mode {
+            ExecutionMode::Auto => self.auto_mode.get().map_or(ExecutionMode::Sequential, |(m, _)| *m),
+            m => m,
+        };
+        if requested == ExecutionMode::GPU {
             let gpu_ready = self.device_evaluator().is_some();
             return if gpu_ready { ExecutionMode::GPU } else { ExecutionMode::MultiThreaded };
         }
-        self.execution_mode
+        requested
+    }
+
+    /// What `Auto` chose and why, or that it hasn't run yet; `None` for an explicit mode.
+    fn auto_note(&self) -> Option<String> {
+        (self.execution_mode == ExecutionMode::Auto).then(|| {
+            self.auto_mode
+                .get()
+                .map_or("auto: resolves on the first evaluation".to_string(), |(_, note)| note.clone())
+        })
     }
 
     /// Solutions evaluated on the GPU so far, when a GPU evaluator is attached.
@@ -299,20 +315,7 @@ impl NSGAIII {
     /// Evaluate via the shared routine, so NSGA-III gets the same batch-objective and GPU
     /// support as NSGA-II rather than silently running everything on the CPU.
     fn evaluate(&self, population: &mut Vec<Solution>) -> usize {
-        {
-            if let Some(gpu) = self.device_evaluator() {
-                let run_gpu = |inputs: &Vec<Vec<f64>>| gpu.evaluate_batch(inputs);
-                let n = evaluate_population_shared(
-                    population,
-                    &self.problem,
-                    self.execution_mode,
-                    Some(&run_gpu),
-                );
-                self.nfe.fetch_add(n, Ordering::Relaxed);
-                return n;
-            }
-        }
-        let n = evaluate_population_shared(population, &self.problem, self.execution_mode, None);
+        let n = evaluate_routed(population, &self.problem, self.execution_mode, self.device_evaluator(), &self.auto_mode);
         self.nfe.fetch_add(n, Ordering::Relaxed);
         n
     }
