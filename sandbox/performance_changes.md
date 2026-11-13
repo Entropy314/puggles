@@ -11,7 +11,7 @@ This report covers what changed in puggles between 2026-11-06 and 2026-11-13, wh
 - **Python↔Rust overhead is down about 1.3× on small data.** Batch objectives can exchange NumPy arrays instead of nested lists (`batch_numpy=True`).
 - **Python-written per-solution objectives can now use all CPU cores.** A Numba `@cfunc` runs from Rust without the GIL (`objective_cfunc`). That's 2.3–7.8× faster than the same objective as a plain Python function, and within about 15% of native Rust threads.
 - **PyTorch and JAX objectives work through the batch interface with no puggles changes.** At 1 GB, Torch on the Apple GPU takes 4.7–4.8 s (2.8–2.9× faster than pymoo) and JAX on the CPU takes 4.3–6.0 s (2.3–3.2× faster).
-- **GPU kernels can be written in Rust** (CubeCL), within about 1.1–1.2× of hand-written WGSL. A CUDA backend with Rust kernels (Rust-CUDA) is written but **not yet built or tested**.
+- **GPU kernels can be written in Rust** (CubeCL), within about 1.1–1.2× of hand-written WGSL. A CUDA backend with Rust kernels (Rust-CUDA) now builds and runs on an NVIDIA L4: 2.6 s at 1 GB, 12× faster than pymoo, with results matching the CPU (see [`report_cuda_and_cloud.md`](report_cuda_and_cloud.md)).
 
 ## 1. Changes in the core library
 
@@ -161,7 +161,7 @@ Recommendation: adopt it as an optional feature or companion crate, not a core d
 
 **Why it would matter:** native f64 on NVIDIA GPUs, which WGSL lacks, plus CUDA's mature compiler.
 
-**Status:** **never compiled or run.** Rust-CUDA needs Linux or Windows, an NVIDIA GPU, CUDA 12+ and LLVM 7 or 21, and this Mac has none of them. It's a separate crate because crates.io refuses git dependencies, and so that puggles keeps building on stable Rust. Its benchmark row reports `not built`.
+**Status:** built and benchmarked on a GCP g2-standard-8 (NVIDIA L4) in Rust-CUDA's CUDA 12 container. It needed three fixes (the codegen-backend feature, a `glam` version pin, and dropping the CUDA context last to avoid a crash at exit). Results: 2.6 s at 1 GB multi-objective vs pymoo's 32.7 s and PyTorch-CUDA's 1.5 s (f32). It's a separate crate because crates.io refuses git dependencies, and so that puggles keeps building on stable Rust. The Mac benchmark row reports `not built`, as it needs Linux and an NVIDIA GPU.
 
 ## 4. Changes to how performance is measured
 
@@ -192,6 +192,6 @@ These changes don't make puggles faster. They make the numbers trustworthy.
 
 
 1. **A native Rust batch objective** (`EvalFn::Batch`) written in the map-reduce style. It would remove native puggles' 1 GB memory-bandwidth gap on the CPU without needing a GPU.
-2. **Build and benchmark `puggles-cuda`** on a Linux NVIDIA machine, and fix the API drift the first build will likely reveal.
+2. **Speed up `puggles-cuda`:** test an f32 mode (the L4 is weak at f64) and tune tiling, aiming at PyTorch's 1.5 s at 1 GB.
 3. **Optional CubeCL integration**, so users can write GPU objectives in Rust.
 4. **A loader that holds the dataset once.** At 1 GB every worker briefly keeps about 3 copies of the 0.9 GB matrix. Building the row-major array straight from the CSV would cut peak memory to about 1 GB.

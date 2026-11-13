@@ -2,7 +2,7 @@
 
 Single- and multi-objective portfolio optimization on real daily stock returns at five dataset sizes. puggles runs in native Rust (sequential, 8 threads, wgpu GPU, CubeCL GPU) and from Python (plain, NumPy batch, Numba batch, Numba cfunc, PyTorch MPS, JAX). It is compared with **pymoo, platypus and DEAP** (Python) and **genevo and genetic_algorithm** (Rust).
 
-**Run date:** 2026-11-06, faster evaluation paths added 2026-11-13 · **Raw results:** [`results_datasets.json`](results_datasets.json) · **Drivers:** [`bench_datasets.py`](bench_datasets.py), [`examples/bench_datasets.rs`](examples/bench_datasets.rs), [`scripts/build_real_datasets.py`](scripts/build_real_datasets.py) · An earlier run on synthetic data: [`benchmarks_datasets_synthetic.md`](benchmarks_datasets_synthetic.md) · What changed and why: [`performance_changes.md`](performance_changes.md)
+**Run date:** 2026-11-06, faster evaluation paths added 2026-11-13 · **Raw results:** [`results_datasets.json`](results_datasets.json) · **Drivers:** [`bench_datasets.py`](bench_datasets.py), [`examples/bench_datasets.rs`](examples/bench_datasets.rs), [`scripts/build_real_datasets.py`](scripts/build_real_datasets.py) · An earlier run on synthetic data: [`benchmarks_datasets_synthetic.md`](benchmarks_datasets_synthetic.md) · What changed and why: [`performance_changes.md`](performance_changes.md) · Three-machine summary: [`report_cuda_and_cloud.md`](report_cuda_and_cloud.md)
 
 ## Hardware and software
 
@@ -254,6 +254,104 @@ Times are multi-objective opt times. The cfunc row compares against `puggles (py
 - **The CUDA backend (`puggles-cuda/`, kernels written with Rust-CUDA) was written but never compiled or run.** Rust-CUDA needs Linux/Windows, a pinned nightly, LLVM 7 or 21, CUDA 12+ and an NVIDIA GPU, none of which this Mac has. Its benchmark row shows `not built`.
 - Bootstrapped scenarios replay real days in random 20-day blocks. They are not real history beyond the first 10,242 days.
 - **Toolchain note:** on this macOS 27.2 / Xcode setup, the default `ld` produced a puggles Python extension that wouldn't load ("mis-aligned LINKEDIT string pool"). The bindings were built with the Command Line Tools linker instead: `DEVELOPER_DIR=/Library/Developer/CommandLineTools maturin develop --release`.
+
+## Three machines (2026-11-13): Apple M3, GCP CPU, GCP NVIDIA L4 with Rust-CUDA
+
+The whole suite was rerun on identical datasets (checksums match) on three machines. The short version, with problems found and next steps, is in [`report_cuda_and_cloud.md`](report_cuda_and_cloud.md). Raw data: `results_datasets_m3.json`, `results_datasets_gcp_c3.json`, `results_datasets_gcp_g2.json`. The M3 numbers in this section come from that rerun, so they differ slightly from the M3 tables above, which used an earlier download of the same prices.
+
+**Not available on the L4 VM:** the wgpu GPU path and CubeCL, because the VM's NVIDIA Vulkan driver would not initialize and wgpu only found a CPU software renderer. Those rows are marked `no GPU` (wgpu) or omitted (CubeCL). CUDA and PyTorch-CUDA are unaffected. **Not built on the Mac:** Rust-CUDA, which needs Linux and an NVIDIA GPU.
+
+### Machines
+
+| | Apple M3 (local) | GCP c3-standard-8 | GCP g2-standard-8 (Spot) |
+| --- | --- | --- | --- |
+| CPU | Apple M3 (4P + 4E cores) | Intel(R) Xeon(R) Platinum 8481C CPU @ 2.70GHz | Intel(R) Xeon(R) CPU @ 2.20GHz |
+| Threads | 8 | 8 vCPU | 8 vCPU |
+| Memory | 16 GB unified | 31 GB | 31 GB |
+| GPU | Apple M3, 10 cores (Metal) | none | NVIDIA L4, 23034 MiB, 580.178.04 |
+| OS | macOS 27.2.1 (26B131) | Ubuntu 24.04.5 LTS (7.0.0-1017-gcp) | Ubuntu 24.04.5 LTS (7.0.0-1017-gcp) |
+| Python / torch / jax | 3.14.7 / 2.15.0 / 0.12.0.1 | 3.14.10 / 2.15.0+cpu / 0.12.0.1 | 3.14.10 / 2.15.0 / 0.12.0.1 |
+
+### 1 GB, multi-objective: the same path on each machine (opt time, ↓ lower is better)
+
+| path | Apple M3 | GCP c3-standard-8 | GCP g2 + L4 |
+| --- | --- | --- | --- |
+| puggles (native, sequential) | 64.3 s | 184.0 s | 219.2 s |
+| puggles (native, 8 threads) | 27.8 s | 26.3 s | 38.1 s |
+| puggles (native, CPU row scan) | 14.4 s | 17.6 s | 34.8 s |
+| puggles (native, Auto) | 2.7 s | 27.2 s | 39.8 s |
+| puggles (native, GPU) | 1.7 s | n/a | no GPU |
+| puggles (native, CubeCL GPU) | 2.0 s | n/a | n/a |
+| puggles (native, CUDA, Rust-CUDA) | not built | n/a | 2.6 s |
+| puggles (py, batch) | 13.4 s | 25.1 s | 33.0 s |
+| puggles (py, numba batch) | 6.8 s | 8.1 s | 10.0 s |
+| puggles (py, numba cfunc, 8 threads) | 19.6 s | 37.4 s | 46.1 s |
+| puggles (py, jax jit+vmap) | 4.7 s | 6.9 s | 9.1 s |
+| puggles (py, torch batch) | 5.1 s | 24.1 s | 1.5 s |
+| pymoo | 13.5 s | 25.0 s | 32.7 s |
+| pymoo (numba) | 7.0 s | 8.3 s | 10.9 s |
+| platypus | 95.8 s | 57.2 s | 70.7 s |
+| DEAP | 97.4 s | 57.2 s | 70.6 s |
+| puggles (py) | 99.0 s | 57.9 s | 68.8 s |
+
+### 1 GB, single-objective: the same path on each machine (opt time, ↓ lower is better)
+
+| path | Apple M3 | GCP c3-standard-8 | GCP g2 + L4 |
+| --- | --- | --- | --- |
+| puggles (native, sequential) | 42.3 s | 183.5 s | 218.9 s |
+| puggles (native, 8 threads) | 22.6 s | 26.4 s | 38.1 s |
+| puggles (native, CPU row scan) | 13.0 s | 17.6 s | 34.8 s |
+| puggles (native, Auto) | 2.0 s | 27.2 s | 40.3 s |
+| puggles (native, GPU) | 1.9 s | n/a | no GPU |
+| puggles (native, CubeCL GPU) | 1.8 s | n/a | n/a |
+| puggles (native, CUDA, Rust-CUDA) | not built | n/a | 2.6 s |
+| puggles (py, batch) | 14.1 s | 25.0 s | 34.1 s |
+| puggles (py, numba batch) | 7.6 s | 8.1 s | 11.4 s |
+| puggles (py, numba cfunc, 8 threads) | 21.6 s | 37.1 s | 46.2 s |
+| puggles (py, jax jit+vmap) | 5.0 s | 6.9 s | 9.0 s |
+| puggles (py, torch batch) | 5.3 s | 24.3 s | 1.5 s |
+| pymoo | 14.4 s | 25.1 s | 32.8 s |
+| pymoo (numba) | 7.6 s | 8.4 s | 10.9 s |
+| platypus | 103.1 s | 56.7 s | 69.7 s |
+| DEAP | 102.7 s | 56.7 s | 70.2 s |
+| genevo | 41.1 s | 138.0 s | 162.9 s |
+| genetic_algorithm | 55.2 s | 186.9 s | 224.1 s |
+| puggles (py) | 113.3 s | 57.0 s | 70.9 s |
+
+### Rust-CUDA on the NVIDIA L4 against the other paths on that machine
+
+Opt time, multi-objective, ↓ lower is better. The ratio column is pymoo's time on the same machine divided by the CUDA time.
+
+| size | puggles (native, CUDA, Rust-CUDA) | puggles (py, torch batch) | puggles (py, jax jit+vmap) | puggles (py, numba batch) | puggles (native, 8 threads) | pymoo | pymoo ÷ CUDA ↑ |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1kb | 216 ms | 571 ms | 97 ms | 85 ms | 61 ms | 1,209 ms | 5.6× |
+| 1mb | 310 ms | 445 ms | 166 ms | 154 ms | 225 ms | 1,468 ms | 4.7× |
+| 10mb | 396 ms | 427 ms | 567 ms | 593 ms | 1,657 ms | 3,116 ms | 7.9× |
+| 100mb | 407 ms | 423 ms | 896 ms | 978 ms | 3,748 ms | 3,663 ms | 9.0× |
+| 1gb | 2,646 ms | 1,543 ms | 9,069 ms | 9,969 ms | 38.1 s | 32.7 s | 12.4× |
+
+Same comparison, single-objective:
+
+| size | puggles (native, CUDA, Rust-CUDA) | puggles (py, torch batch) | puggles (py, jax jit+vmap) | puggles (py, numba batch) | puggles (native, 8 threads) | pymoo | pymoo ÷ CUDA ↑ |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1kb | 179 ms | 400 ms | 52 ms | 50 ms | 31 ms | 977 ms | 5.5× |
+| 1mb | 281 ms | 412 ms | 129 ms | 102 ms | 197 ms | 1,483 ms | 5.3× |
+| 10mb | 314 ms | 410 ms | 518 ms | 565 ms | 1,625 ms | 3,075 ms | 9.8× |
+| 100mb | 406 ms | 619 ms | 900 ms | 1,174 ms | 3,721 ms | 3,750 ms | 9.2× |
+| 1gb | 2,614 ms | 1,511 ms | 9,029 ms | 11.4 s | 38.1 s | 32.8 s | 12.5× |
+
+At 1 GB on the L4 (multi-objective): CPU time and peak memory.
+
+| path | opt time ↓ | CPU s ↓ | peak memory ↓ | HV ↑ |
+| --- | --- | --- | --- | --- |
+| puggles (native, CUDA, Rust-CUDA) | 2.6 s | 29.1 | 1,951 MB | 0.716 |
+| puggles (py, torch batch) | 1.5 s | 18.0 | 2,992 MB | 0.716 |
+| puggles (py, jax jit+vmap) | 9.1 s | 63.5 | 2,879 MB | 0.716 |
+| puggles (py, numba batch) | 10.0 s | 100.1 | 2,810 MB | 0.716 |
+| puggles (native, 8 threads) | 38.1 s | 315.4 | 2,578 MB | 0.716 |
+| pymoo | 32.7 s | 271.1 | 2,814 MB | 0.720 |
+| puggles (native, sequential) | 219.2 s | 241.4 | 2,578 MB | 0.716 |
+| puggles (native, CPU row scan) | 34.8 s | 295.7 | 2,578 MB | 0.717 |
 
 ## Reproduce
 
