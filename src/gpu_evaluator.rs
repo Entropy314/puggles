@@ -31,6 +31,20 @@
 ///     // ... your objective computation here ...
 /// }
 /// ```
+///
+/// By default one workgroup covers 64 solutions (one thread each).
+///
+/// # Map-reduce ("partials") mode
+///
+/// An objective that scans a large `data` buffer should read each row once per generation for
+/// ALL solutions, not once per solution. `with_partials(blocks, k, finish)` switches to:
+/// - dispatch `blocks` workgroups regardless of population size; workgroup `b` owns a block of
+///   data rows, and its threads share each row (load it into `var<workgroup>` memory) while
+///   each thread accumulates for one or more solutions;
+/// - write `objectives[(b * pop_size + p) * k + j]` = partial sum `j` of solution `p` over block
+///   `b` (the output buffer is sized `blocks × pop × k`);
+/// - on the CPU, blocks are summed in f64 and `finish(&sums)` turns each solution's `k` sums
+///   into its objectives (see [`crate::core::reduce_partials`]).
 
 use wgpu::util::DeviceExt;
 
@@ -47,6 +61,8 @@ pub struct GpuEvaluator {
     evaluated: std::sync::atomic::AtomicUsize,
     pub solution_length: usize,
     pub num_objectives: usize,
+    /// Map-reduce mode, see the module docs: (blocks, partials per solution, finish).
+    partials: Option<(u32, usize, fn(&[f64]) -> Vec<f64>)>,
 }
 
 /// Cast any `&[T]` to `&[u8]`.
@@ -109,7 +125,8 @@ impl GpuEvaluator {
         eprintln!("puggles: GPU = {} ({:?}, {:?})", info.name, info.device_type, info.backend);
 
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default(), None)
+            // Adapter limits, not wgpu's 128 MiB default, so large datasets can bind at binding 3.
+            .request_device(&wgpu::DeviceDescriptor { required_limits: adapter.limits(), ..Default::default() }, None)
             .await
             .expect("Failed to create wgpu device");
 
@@ -201,7 +218,16 @@ impl GpuEvaluator {
             evaluated: std::sync::atomic::AtomicUsize::new(0),
             solution_length,
             num_objectives,
+            partials: None,
         }
+    }
+
+    /// Map-reduce mode (see the module docs): dispatch `blocks` workgroups, read back
+    /// `blocks × pop × k` partial sums, and let `finish` turn each solution's summed partials
+    /// into its objectives.
+    pub fn with_partials(mut self, blocks: u32, k: usize, finish: fn(&[f64]) -> Vec<f64>) -> Self {
+        self.partials = Some((blocks.max(1), k, finish));
+        self
     }
 
     /// The adapter in use (name, vendor, device type, backend, driver).
@@ -236,7 +262,8 @@ impl GpuEvaluator {
             .flat_map(|s| s.iter().map(|&v| v as f32))
             .collect();
 
-        let output_size = (pop_size * self.num_objectives * std::mem::size_of::<f32>()) as u64;
+        let per_solution = self.partials.map_or(self.num_objectives, |(b, k, _)| b as usize * k);
+        let output_size = (pop_size * per_solution * std::mem::size_of::<f32>()) as u64;
 
         let solution_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("solutions"),
@@ -292,8 +319,7 @@ impl GpuEvaluator {
             });
             cpass.set_pipeline(&self.pipeline);
             cpass.set_bind_group(0, &bind_group, &[]);
-            // Workgroup size 64: dispatch enough groups to cover pop_size
-            let workgroups = (pop_size as u32 + 63) / 64;
+            let workgroups = self.partials.map_or((pop_size as u32 + 63) / 64, |(b, _, _)| b);
             cpass.dispatch_workgroups(workgroups, 1, 1);
         }
 
@@ -310,13 +336,85 @@ impl GpuEvaluator {
         let results = {
             let raw = slice.get_mapped_range();
             let floats: &[f32] = unsafe { as_f32_slice(&raw) };
-            floats
-                .chunks_exact(self.num_objectives)
-                .map(|chunk| chunk.iter().map(|&v| v as f64).collect())
-                .collect()
+            match self.partials {
+                Some((b, k, finish)) => crate::core::reduce_partials(floats, b as usize, pop_size, k, finish),
+                None => floats
+                    .chunks_exact(self.num_objectives)
+                    .map(|chunk| chunk.iter().map(|&v| v as f64).collect())
+                    .collect(),
+            }
         };
 
         staging_buf.unmap();
         results
+    }
+}
+
+impl crate::core::BatchEvaluator for GpuEvaluator {
+    fn evaluate_batch(&self, solutions: &[Vec<f64>]) -> Vec<Vec<f64>> {
+        GpuEvaluator::evaluate_batch(self, solutions)
+    }
+    fn device_description(&self) -> String {
+        GpuEvaluator::device_description(self)
+    }
+    fn evaluated_count(&self) -> usize {
+        GpuEvaluator::evaluated_count(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GpuEvaluator;
+
+    const HEADER: &str = r#"
+@group(0) @binding(0) var<storage, read> solutions: array<f32>;
+@group(0) @binding(1) var<storage, read_write> objectives: array<f32>;
+struct Params { solution_length: u32, num_objectives: u32, pop_size: u32 };
+@group(0) @binding(2) var<uniform> params: Params;
+@group(0) @binding(3) var<storage, read> data: array<f32>;
+"#;
+
+    /// f = Σ_i x_i · data[i], once with the default one-thread-per-solution dispatch and once in
+    /// partials mode (workgroup = block of i, thread = solution, blocks summed on the CPU).
+    #[test]
+    #[ignore = "needs a GPU adapter"]
+    fn default_and_partials_modes_match_the_cpu() {
+        let per_thread = format!("{HEADER}{}", r#"
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    if (id.x >= params.pop_size) { return; }
+    var f: f32 = 0.0;
+    for (var i: u32 = 0u; i < params.solution_length; i = i + 1u) {
+        f = f + solutions[id.x * params.solution_length + i] * data[i];
+    }
+    objectives[id.x] = f;
+}"#);
+        const BLOCKS: u32 = 7;
+        let partials = format!("{HEADER}{}", r#"
+@compute @workgroup_size(64)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
+    let n = params.solution_length;
+    let lo = wid.x * n / 7u;
+    let hi = (wid.x + 1u) * n / 7u;
+    for (var p: u32 = lid; p < params.pop_size; p = p + 64u) {
+        var f: f32 = 0.0;
+        for (var i: u32 = lo; i < hi; i = i + 1u) { f = f + solutions[p * n + i] * data[i]; }
+        objectives[wid.x * params.pop_size + p] = f;
+    }
+}"#);
+        let (n, pop) = (300, 130); // pop > 64 so the default dispatch needs several workgroups
+        let data: Vec<f32> = (0..n).map(|i| (i % 7) as f32 * 0.25).collect();
+        let sols: Vec<Vec<f64>> = (0..pop).map(|p| (0..n).map(|i| ((p + i) % 5) as f64 * 0.5).collect()).collect();
+        let want: Vec<f64> = sols.iter()
+            .map(|s| s.iter().zip(&data).map(|(x, d)| x * *d as f64).sum())
+            .collect();
+
+        let a = GpuEvaluator::new_blocking_with_data(&per_thread, n, 1, &data).evaluate_batch(&sols);
+        let b = GpuEvaluator::new_blocking_with_data(&partials, n, 1, &data)
+            .with_partials(BLOCKS, 1, |sums| vec![sums[0]])
+            .evaluate_batch(&sols);
+        for ((a, b), w) in a.iter().zip(&b).zip(&want) {
+            assert!((a[0] - w).abs() < 1e-2 && (b[0] - w).abs() < 1e-2, "{a:?} {b:?} vs {w}");
+        }
     }
 }

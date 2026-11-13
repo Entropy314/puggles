@@ -47,6 +47,37 @@ pub enum Encoding {
     Permutation,
 }
 
+/// A device that evaluates a whole population per call (wgpu, CUDA, ...). Attach one with
+/// `NSGAII::with_batch_evaluator` / `NSGAIII::with_batch_evaluator` and run in `ExecutionMode::GPU`.
+pub trait BatchEvaluator: Send + Sync {
+    /// One objective vector per input solution, in order.
+    fn evaluate_batch(&self, solutions: &[Vec<f64>]) -> Vec<Vec<f64>>;
+    /// e.g. `"Apple M3 (IntegratedGpu, Metal)"`.
+    fn device_description(&self) -> String;
+    /// Solutions evaluated so far.
+    fn evaluated_count(&self) -> usize;
+}
+
+/// Finish a map-reduce ("partials") evaluation. `raw[(b * pop + p) * k + j]` is partial sum `j`
+/// of solution `p` over data block `b`; blocks are summed in f64, then `finish` turns each
+/// solution's `k` sums into its objectives. Shared by the device backends (f32 or f64 partials).
+pub fn reduce_partials<T: Copy + Into<f64>>(
+    raw: &[T],
+    blocks: usize,
+    pop: usize,
+    k: usize,
+    finish: impl Fn(&[f64]) -> Vec<f64>,
+) -> Vec<Vec<f64>> {
+    assert_eq!(raw.len(), blocks * pop * k, "partials buffer must be blocks × pop × k");
+    let mut sums = vec![0.0f64; pop * k];
+    for block in raw.chunks_exact(pop * k) {
+        for (s, &v) in sums.iter_mut().zip(block) {
+            *s += v.into();
+        }
+    }
+    sums.chunks_exact(k).map(finish).collect()
+}
+
 /// Evaluation function discriminant: single-solution or batch.
 #[derive(Clone, Debug)]
 pub enum EvalFn {

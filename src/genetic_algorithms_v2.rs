@@ -186,6 +186,9 @@ pub struct NSGAII {
     /// is offloaded to the GPU via wgpu compute shaders.
     #[cfg(feature = "gpu")]
     pub gpu_evaluator: Option<crate::gpu_evaluator::GpuEvaluator>,
+    /// Any other device evaluator (CUDA, CubeCL, ...), attached via `with_batch_evaluator()`.
+    /// Takes precedence over `gpu_evaluator`.
+    pub batch_evaluator: Option<Box<dyn crate::core::BatchEvaluator>>,
 }
 
 impl NSGAII {
@@ -218,6 +221,7 @@ impl NSGAII {
             generation_times: GenerationTimes::default(),
             #[cfg(feature = "gpu")]
             gpu_evaluator: None,
+            batch_evaluator: None,
         }
     }
 
@@ -236,6 +240,25 @@ impl NSGAII {
     pub fn with_gpu_evaluator(mut self, evaluator: crate::gpu_evaluator::GpuEvaluator) -> Self {
         self.gpu_evaluator = Some(evaluator);
         self
+    }
+
+    /// Attach any device evaluator (e.g. a CUDA or CubeCL backend from another crate) for use
+    /// when `execution_mode == GPU`. Builder method; takes precedence over `with_gpu_evaluator`.
+    pub fn with_batch_evaluator(mut self, evaluator: impl crate::core::BatchEvaluator + 'static) -> Self {
+        self.batch_evaluator = Some(Box::new(evaluator));
+        self
+    }
+
+    /// The attached device evaluator: `batch_evaluator`, else the wgpu `gpu_evaluator`.
+    fn device_evaluator(&self) -> Option<&dyn crate::core::BatchEvaluator> {
+        if let Some(e) = &self.batch_evaluator {
+            return Some(e.as_ref());
+        }
+        #[cfg(feature = "gpu")]
+        if let Some(g) = &self.gpu_evaluator {
+            return Some(g);
+        }
+        None
     }
 
     /// Assign ranks and crowding distances for the current population.
@@ -406,10 +429,7 @@ impl NSGAII {
             return ExecutionMode::Sequential;
         }
         if self.execution_mode == ExecutionMode::GPU {
-            #[cfg(feature = "gpu")]
-            let gpu_ready = self.gpu_evaluator.is_some();
-            #[cfg(not(feature = "gpu"))]
-            let gpu_ready = false;
+            let gpu_ready = self.device_evaluator().is_some();
             return if gpu_ready { ExecutionMode::GPU } else { ExecutionMode::MultiThreaded };
         }
         self.execution_mode
@@ -419,9 +439,8 @@ impl NSGAII {
     /// and the reason for any fallback.
     pub fn execution_info(&self) -> ExecutionInfo {
         let effective = self.effective_mode();
-        #[cfg(feature = "gpu")]
         if effective == ExecutionMode::GPU {
-            let gpu = self.gpu_evaluator.as_ref().expect("effective GPU implies an evaluator");
+            let gpu = self.device_evaluator().expect("effective GPU implies an evaluator");
             return ExecutionInfo {
                 requested: self.execution_mode,
                 effective,
@@ -446,11 +465,7 @@ impl NSGAII {
 
     /// Solutions evaluated on the GPU so far, when a GPU evaluator is attached.
     pub fn gpu_evaluations(&self) -> Option<usize> {
-        #[cfg(feature = "gpu")]
-        if let Some(gpu) = &self.gpu_evaluator {
-            return Some(gpu.evaluated_count());
-        }
-        None
+        self.device_evaluator().map(|gpu| gpu.evaluated_count())
     }
 
     /// Run one generation, creating at most `max_offspring` new solutions.
@@ -682,9 +697,8 @@ impl NSGAII {
     }
 
     pub fn evaluate_population(&mut self, population: &mut Vec<Solution>) {
-        #[cfg(feature = "gpu")]
         {
-            if let Some(gpu) = self.gpu_evaluator.as_ref() {
+            if let Some(gpu) = self.device_evaluator() {
                 let run_gpu = |inputs: &Vec<Vec<f64>>| gpu.evaluate_batch(inputs);
                 let n = evaluate_population_shared(
                     population,
@@ -987,6 +1001,33 @@ mod tests {
         for sol in &ga.population {
             assert!(sol.evaluated);
         }
+    }
+
+    #[test]
+    fn test_nsgaii_routes_gpu_mode_to_an_attached_batch_evaluator() {
+        // A CPU stand-in for a device backend: evaluates with the problem's own objective.
+        struct Mock(Arc<Problem>, AtomicUsize);
+        impl crate::core::BatchEvaluator for Mock {
+            fn evaluate_batch(&self, solutions: &[Vec<f64>]) -> Vec<Vec<f64>> {
+                self.1.fetch_add(solutions.len(), Ordering::Relaxed);
+                let EvalFn::Single(f) = self.0.eval_fn else { unreachable!() };
+                solutions.iter().map(f).collect()
+            }
+            fn device_description(&self) -> String {
+                "mock".into()
+            }
+            fn evaluated_count(&self) -> usize {
+                self.1.load(Ordering::Relaxed)
+            }
+        }
+        let problem = Arc::new(setup_multi_objective_problem());
+        let mut ga = NSGAII::new(Arc::clone(&problem), 40, ExecutionMode::GPU)
+            .with_batch_evaluator(Mock(Arc::clone(&problem), AtomicUsize::new(0)));
+        assert_eq!(ga.effective_mode(), ExecutionMode::GPU);
+        assert_eq!(ga.execution_info().device.as_deref(), Some("mock"));
+        ga.run(1000);
+        assert_eq!(ga.gpu_evaluations(), Some(ga.get_nfe()), "every evaluation went through the evaluator");
+        assert!(!ga.archive.is_empty());
     }
 
     #[test]

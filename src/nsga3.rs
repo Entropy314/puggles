@@ -73,6 +73,9 @@ pub struct NSGAIII {
     /// with a warning instead of silently running on the CPU.
     #[cfg(feature = "gpu")]
     pub gpu_evaluator: Option<crate::gpu_evaluator::GpuEvaluator>,
+    /// Any other device evaluator (CUDA, CubeCL, ...), attached via `with_batch_evaluator()`.
+    /// Takes precedence over `gpu_evaluator`.
+    pub batch_evaluator: Option<Box<dyn crate::core::BatchEvaluator>>,
 }
 
 impl NSGAIII {
@@ -114,6 +117,7 @@ impl NSGAIII {
             generation_times: GenerationTimes::default(),
             #[cfg(feature = "gpu")]
             gpu_evaluator: None,
+            batch_evaluator: None,
         }
     }
 
@@ -123,6 +127,25 @@ impl NSGAIII {
     pub fn with_gpu_evaluator(mut self, evaluator: crate::gpu_evaluator::GpuEvaluator) -> Self {
         self.gpu_evaluator = Some(evaluator);
         self
+    }
+
+    /// Attach any device evaluator (e.g. a CUDA or CubeCL backend from another crate) for use
+    /// when `execution_mode == GPU`. Builder method; takes precedence over `with_gpu_evaluator`.
+    pub fn with_batch_evaluator(mut self, evaluator: impl crate::core::BatchEvaluator + 'static) -> Self {
+        self.batch_evaluator = Some(Box::new(evaluator));
+        self
+    }
+
+    /// The attached device evaluator: `batch_evaluator`, else the wgpu `gpu_evaluator`.
+    fn device_evaluator(&self) -> Option<&dyn crate::core::BatchEvaluator> {
+        if let Some(e) = &self.batch_evaluator {
+            return Some(e.as_ref());
+        }
+        #[cfg(feature = "gpu")]
+        if let Some(g) = &self.gpu_evaluator {
+            return Some(g);
+        }
+        None
     }
 
     /// Seed all randomness for a reproducible run. Builder-style; call before `run`.
@@ -212,9 +235,8 @@ impl NSGAIII {
     /// Where evaluations run. NSGA-III has no GPU path: `GPU` runs on CPU threads.
     pub fn execution_info(&self) -> ExecutionInfo {
         let effective = self.effective_mode();
-        #[cfg(feature = "gpu")]
         if effective == ExecutionMode::GPU {
-            let gpu = self.gpu_evaluator.as_ref().expect("effective GPU implies an evaluator");
+            let gpu = self.device_evaluator().expect("effective GPU implies an evaluator");
             return ExecutionInfo {
                 requested: self.execution_mode,
                 effective,
@@ -244,10 +266,7 @@ impl NSGAIII {
             return ExecutionMode::Sequential;
         }
         if self.execution_mode == ExecutionMode::GPU {
-            #[cfg(feature = "gpu")]
-            let gpu_ready = self.gpu_evaluator.is_some();
-            #[cfg(not(feature = "gpu"))]
-            let gpu_ready = false;
+            let gpu_ready = self.device_evaluator().is_some();
             return if gpu_ready { ExecutionMode::GPU } else { ExecutionMode::MultiThreaded };
         }
         self.execution_mode
@@ -255,11 +274,7 @@ impl NSGAIII {
 
     /// Solutions evaluated on the GPU so far, when a GPU evaluator is attached.
     pub fn gpu_evaluations(&self) -> Option<usize> {
-        #[cfg(feature = "gpu")]
-        if let Some(gpu) = &self.gpu_evaluator {
-            return Some(gpu.evaluated_count());
-        }
-        None
+        self.device_evaluator().map(|gpu| gpu.evaluated_count())
     }
 
     fn initialize(&mut self) {
@@ -284,9 +299,8 @@ impl NSGAIII {
     /// Evaluate via the shared routine, so NSGA-III gets the same batch-objective and GPU
     /// support as NSGA-II rather than silently running everything on the CPU.
     fn evaluate(&self, population: &mut Vec<Solution>) -> usize {
-        #[cfg(feature = "gpu")]
         {
-            if let Some(gpu) = self.gpu_evaluator.as_ref() {
+            if let Some(gpu) = self.device_evaluator() {
                 let run_gpu = |inputs: &Vec<Vec<f64>>| gpu.evaluate_batch(inputs);
                 let n = evaluate_population_shared(
                     population,
