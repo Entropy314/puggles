@@ -15,11 +15,13 @@ static PTX: &str = include_str!(concat!(env!("OUT_DIR"), "/kernels.ptx"));
 const TILE: usize = 64; // must match kernels::TILE
 const THREADS: u32 = 128; // threads per block; the kernel needs ≥ pop threads
 
+// Fields drop in declaration order, so `ctx` must come last: destroying the CUDA context before
+// the module, stream and device buffers that live in it crashes the process (SIGSEGV) at exit.
 struct Device {
-    ctx: Context,
     module: Module,
     stream: Stream,
     data: DeviceBuffer<f64>,
+    ctx: Context,
 }
 
 pub struct CudaEvaluator {
