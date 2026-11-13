@@ -22,9 +22,12 @@ const N: usize = 20; // assets
 const POP: usize = 100;
 
 /// Row-major returns matrix: DATA[t * N + i].
-static DATA: OnceLock<Vec<f64>> = OnceLock::new();
+// Arc so the row-scan evaluator can share it without copying 0.9 GB.
+static DATA: OnceLock<Arc<[f64]>> = OnceLock::new();
 /// Counts every real objective evaluation (the GPU path bypasses it; reported as NFE).
 static EVALS: AtomicUsize = AtomicUsize::new(0);
+/// The GA's own evaluation count for the last puggles run (device evaluators bypass `EVALS`).
+static PUGGLES_NFE: AtomicUsize = AtomicUsize::new(0);
 /// Rows scanned per evaluation. Only lowered while calibrating genetic_algorithm (see `run_ga`).
 static ROW_LIMIT: AtomicUsize = AtomicUsize::new(usize::MAX);
 
@@ -78,7 +81,7 @@ fn load(path: &str) -> f64 {
     for r in 0..t {
         data.extend(cols.iter().map(|c| c[r]));
     }
-    DATA.set(data).unwrap();
+    DATA.set(data.into()).unwrap();
     t0.elapsed().as_secs_f64() * 1000.0
 }
 
@@ -184,23 +187,56 @@ fn problem(multi: bool) -> Arc<Problem> {
     })
 }
 
+/// The portfolio objective as a CPU map-reduce evaluator: one pass over the rows per generation,
+/// all solutions updated per row, on every core.
+fn row_scan(multi: bool) -> impl puggles::core::BatchEvaluator {
+    puggles::row_scan::RowScanEvaluator::new(
+        Arc::clone(DATA.get().unwrap()),
+        N,
+        2,
+        |x: &[f64]| {
+            let t: f64 = x.iter().sum();
+            if t > 1e-12 { x.iter().map(|v| v / t).collect() } else { vec![1.0 / N as f64; N] }
+        },
+        |w: &[f64], row: &[f64], acc: &mut [f64]| {
+            let r: f64 = w.iter().zip(row).map(|(a, b)| a * b).sum();
+            acc[0] += r;
+            acc[1] += r * r;
+        },
+        if multi { finish_multi } else { finish_single },
+    )
+}
+
 /// Returns the final genomes worth reporting (archive for multi, best for single).
 fn run_puggles(mode: &str, multi: bool, nfe: usize, seed: u64) -> Vec<Vec<f64>> {
     let exec = match mode {
         "puggles-par" => ExecutionMode::MultiThreaded,
-        "puggles-gpu" => ExecutionMode::GPU,
+        "puggles-gpu" | "puggles-rowscan" => ExecutionMode::GPU,
+        "puggles-auto" => ExecutionMode::Auto,
         _ => ExecutionMode::Sequential,
     };
     let mut ga = NSGAII::new(problem(multi), POP, exec).with_seed(seed);
+    if mode == "puggles-rowscan" {
+        ga = ga.with_batch_evaluator(row_scan(multi));
+    }
+    // Auto gets the setup a user would have: the GPU evaluator attached, CPU modes available.
     #[cfg(feature = "gpu")]
-    if mode == "puggles-gpu" {
+    if mode == "puggles-gpu" || mode == "puggles-auto" {
         let data: Vec<f32> = DATA.get().unwrap().iter().map(|&v| v as f32).collect();
         // ~1k rows per block, capped so huge files still give a few hundred workgroups.
         let blocks = rows().div_ceil(1024).clamp(1, 256) as u32;
-        let ev = puggles::gpu_evaluator::GpuEvaluator::new_blocking_with_data(
+        let make = || puggles::gpu_evaluator::GpuEvaluator::new_blocking_with_data(
             &shader(rows()), N, if multi { 2 } else { 1 }, &data)
             .with_partials(blocks, 2, if multi { finish_multi } else { finish_single });
-        ga = ga.with_gpu_evaluator(ev);
+        if mode == "puggles-gpu" {
+            ga = ga.with_gpu_evaluator(make());
+        } else {
+            // Auto on a machine without a GPU adapter: run with the CPU modes only.
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(make)) {
+                Ok(ev) => ga = ga.with_gpu_evaluator(ev),
+                Err(_) => eprintln!("# no GPU adapter; Auto chooses among CPU modes"),
+            }
+        }
     }
     #[cfg(not(feature = "gpu"))]
     if mode == "puggles-gpu" {
@@ -208,6 +244,10 @@ fn run_puggles(mode: &str, multi: bool, nfe: usize, seed: u64) -> Vec<Vec<f64>> 
         panic!("build with --features gpu for puggles-gpu");
     }
     ga.run(nfe);
+    PUGGLES_NFE.store(ga.get_nfe(), Ordering::Relaxed);
+    if mode == "puggles-auto" {
+        eprintln!("# {}", ga.execution_info().note.unwrap_or_default());
+    }
     let archive = ga.get_archive();
     if multi {
         archive.iter().map(|s| s.solution.clone()).collect()
@@ -333,7 +373,7 @@ fn main() {
         _ => run_puggles(lib, multi, nfe, seed),
     };
     let opt_ms = t0.elapsed().as_secs_f64() * 1000.0;
-    let evals = if lib == "puggles-gpu" { nfe } else { EVALS.load(Ordering::Relaxed) };
+    let evals = if lib.starts_with("puggles") { PUGGLES_NFE.load(Ordering::Relaxed) } else { EVALS.load(Ordering::Relaxed) };
 
     println!("RESULT\t{load_ms:.1}\t{opt_ms:.1}\t{evals}");
     for g in &genomes {

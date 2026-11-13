@@ -15,6 +15,7 @@
    returns into a price level would overflow.
 
 Run:  python3 -I scripts/build_real_datasets.py <raw_cache_dir>
+      python3 -I scripts/build_real_datasets.py data/real_prices.csv   # rebuild from saved prices
 """
 import json
 import os
@@ -50,13 +51,17 @@ def fetch(raw_dir, t):
             .drop("ts").drop_nulls().unique("date", keep="last"))
 
 
-def main(raw_dir):
-    os.makedirs(raw_dir, exist_ok=True)
-    prices = fetch(raw_dir, TICKERS[0])
-    for t in TICKERS[1:]:
-        prices = prices.join(fetch(raw_dir, t), on="date", how="inner")
-    prices = prices.sort("date").select(["date", *TICKERS])
-    prices.write_csv(os.path.join(DATA, "real_prices.csv"), float_precision=4)
+def main(source):
+    if source.endswith(".csv"):  # a saved real_prices.csv: no download needed
+        prices = pl.read_csv(source, try_parse_dates=True).select(["date", *TICKERS])
+    else:
+        os.makedirs(source, exist_ok=True)
+        prices = fetch(source, TICKERS[0])
+        for t in TICKERS[1:]:
+            prices = prices.join(fetch(source, t), on="date", how="inner")
+        prices = prices.sort("date").select(["date", *TICKERS])
+        # Full precision, so rebuilding from this file reproduces the datasets exactly.
+        prices.write_csv(os.path.join(DATA, "real_prices.csv"))
 
     rets = (prices.with_columns(pl.col(TICKERS).pct_change())
             .slice(1)  # first row has no previous price

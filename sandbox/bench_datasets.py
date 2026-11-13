@@ -16,7 +16,7 @@ Two roles:
                                                one Python-library run (prints RESULT/FRONT/BEST,
                                                the same format as examples/bench_datasets.rs).
 
-Driver flags: --sizes 1kb,1mb  --nfe 500  --runs 1  --libs pymoo,puggles-seq  --out file.json
+Driver flags: --sizes 1kb,1mb  --nfe 500  --runs 1  --libs pymoo,puggles-seq  --out file.json  --resume 1
               --prefix real_returns_ (default; real-price data) | returns_ (synthetic)
 Prereqs: cargo build --release --features gpu,cubecl --example bench_datasets --example bench_cubecl
          (cd ../python && DEVELOPER_DIR=/Library/Developer/CommandLineTools \
@@ -41,7 +41,7 @@ CHUNK = 65_536  # rows per block in the vectorized objective (bounds the T×POP 
 # (label, NFE, runs). The big files get a smaller budget and one run (user-approved).
 SIZES = [("1kb", 10_000, 3), ("1mb", 10_000, 3), ("10mb", 10_000, 3),
          ("100mb", 2_000, 1), ("1gb", 2_000, 1)]
-RUST_LIBS = ["puggles-seq", "puggles-par", "puggles-gpu", "puggles-cubecl", "puggles-cuda", "genevo", "ga"]
+RUST_LIBS = ["puggles-seq", "puggles-par", "puggles-rowscan", "puggles-auto", "puggles-gpu", "puggles-cubecl", "puggles-cuda", "genevo", "ga"]
 # Rust workers other than examples/bench_datasets (same CLI and output lines).
 BINARIES = {
     "puggles-cubecl": os.path.join(HERE, "target/release/examples/bench_cubecl"),
@@ -54,10 +54,11 @@ TIMEOUT_S = 900
 NAMES = {
     "puggles-seq": "puggles (native, sequential)", "puggles-par": "puggles (native, 8 threads)",
     "puggles-gpu": "puggles (native, GPU)", "genevo": "genevo", "ga": "genetic_algorithm",
+    "puggles-rowscan": "puggles (native, CPU row scan)", "puggles-auto": "puggles (native, Auto)",
     "puggles-cubecl": "puggles (native, CubeCL GPU)", "puggles-cuda": "puggles (native, CUDA, Rust-CUDA)",
     "puggles-py": "puggles (py)", "puggles-py-batch": "puggles (py, batch)",
     "puggles-py-numba": "puggles (py, numba batch)", "pymoo-numba": "pymoo (numba)",
-    "puggles-py-cfunc": "puggles (py, numba cfunc, 8 threads)", "puggles-py-torch": "puggles (py, torch MPS batch)",
+    "puggles-py-cfunc": "puggles (py, numba cfunc, 8 threads)", "puggles-py-torch": "puggles (py, torch batch)",
     "puggles-py-jax": "puggles (py, jax jit+vmap)",
     "pymoo": "pymoo", "platypus": "platypus", "deap": "DEAP",
 }
@@ -233,7 +234,8 @@ def torch_batch(multi):
     """Batch objective on the Apple GPU via PyTorch MPS (f32: MPS has no f64). Row chunks keep
     the (chunk × P) intermediate small; the per-solution sums come back once per generation."""
     import torch
-    dev = torch.device("mps")
+    dev = torch.device("cuda" if torch.cuda.is_available() else
+                       "mps" if torch.backends.mps.is_available() else "cpu")
     Rt = torch.as_tensor(R, dtype=torch.float32).to(dev)  # upload counts as optimizer time, like the GPU row
     chunk = 262_144
 
@@ -393,13 +395,29 @@ def sh(cmd):
 
 def hardware():
     import importlib.metadata as md
-    gpu = re.search(r"Total Number of Cores: (\d+)", sh("system_profiler SPDisplaysDataType"))
     vers = {}
-    for pkg in ["puggles", "pymoo", "platypus-opt", "deap", "numpy", "polars"]:
+    for pkg in ["puggles", "pymoo", "platypus-opt", "deap", "numpy", "polars", "numba", "torch", "jax"]:
         try:
             vers[pkg] = md.version(pkg)
         except md.PackageNotFoundError:
             vers[pkg] = "?"
+    common = {"rustc": sh("rustc --version"), "python": sys.version.split()[0], "versions": vers}
+    if sys.platform == "linux":
+        lscpu = sh("lscpu")
+        field = lambda k: (re.search(rf"^{k}:\s*(.+)$", lscpu, re.M) or [None, "?"])[1].strip()
+        return {
+            "cpu": field("Model name"),
+            "cores": sh("nproc"),
+            "threads_per_core": field("Thread\\(s\\) per core"),
+            "ram_gb": round(int(re.search(r"MemTotal:\s+(\d+)", open("/proc/meminfo").read())[1]) / 2**20),
+            "gpu": sh("nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader") or "none",
+            "cuda": sh("nvcc --version | tail -2 | head -1") or "?",
+            "os": sh(". /etc/os-release && echo $PRETTY_NAME") + " (" + sh("uname -r") + ")",
+            "instance": sh("curl -s -m 2 -H 'Metadata-Flavor: Google' "
+                           "http://metadata.google.internal/computeMetadata/v1/instance/machine-type | sed 's|.*/||'") or "?",
+            **common,
+        }
+    gpu = re.search(r"Total Number of Cores: (\d+)", sh("system_profiler SPDisplaysDataType"))
     return {
         "cpu": sh("sysctl -n machdep.cpu.brand_string"),
         "cores": sh("sysctl -n hw.ncpu"),
@@ -408,9 +426,7 @@ def hardware():
         "gpu_cores": gpu.group(1) if gpu else "?",
         "ram_gb": round(int(sh("sysctl -n hw.memsize") or 0) / 2**30),
         "os": f"macOS {sh('sw_vers -productVersion')} ({sh('sw_vers -buildVersion')})",
-        "rustc": sh("rustc --version"),
-        "python": sys.version.split()[0],
-        "versions": vers,
+        **common,
     }
 
 
@@ -426,22 +442,31 @@ def run_one(lib, size, mode, nfe, seed, prefix):
         return {**rec, "status": "not built"}
     t0 = time.perf_counter()
     try:
-        p = subprocess.run(["/usr/bin/time", "-l", *cmd], capture_output=True, text=True, timeout=TIMEOUT_S)
+        # BSD time on macOS (-l), GNU time on Linux (-v): different flags and report formats.
+        tflag = "-v" if sys.platform == "linux" else "-l"
+        p = subprocess.run(["/usr/bin/time", tflag, *cmd], capture_output=True, text=True, timeout=TIMEOUT_S)
     except subprocess.TimeoutExpired:
         return {**rec, "status": "timeout", "wall_s": TIMEOUT_S}
     rec["wall_s"] = time.perf_counter() - t0
     res = [l.split("\t") for l in p.stdout.splitlines() if l.startswith("RESULT")]
     if p.returncode != 0 or not res:
-        return {**rec, "status": "error", "err": p.stderr.split("real")[0][-800:]}
+        return {**rec, "status": "error", "err": re.split(r"\s+[\d.]+ real|\tCommand being timed", p.stderr)[0][-800:]}
     _, load_ms, opt_ms, evals = res[0]
-    t = re.search(r"([\d.]+) real\s+([\d.]+) user\s+([\d.]+) sys", p.stderr)
-    rss = re.search(r"(\d+)\s+maximum resident set size", p.stderr)
-    # Peak footprint counts compressed/swapped pages too, so unlike max RSS it doesn't
-    # under-report when macOS is under memory pressure.
-    foot = re.search(r"(\d+)\s+peak memory footprint", p.stderr)
-    rec.update(status="ok", load_ms=float(load_ms), opt_ms=float(opt_ms), evals=int(evals),
-               cpu_s=float(t.group(2)) + float(t.group(3)), peak_mb=int(foot.group(1)) / 2**20,
-               rss_mb=int(rss.group(1)) / 2**20)
+    rec.update(status="ok", load_ms=float(load_ms), opt_ms=float(opt_ms), evals=int(evals))
+    if sys.platform == "linux":
+        num = lambda k: float(re.search(rf"{k}:\s*([\d.]+)", p.stderr)[1])
+        # Linux max RSS is reliable here (GCE VMs run without swap), so it is the peak-memory figure.
+        rss_mb = num(r"Maximum resident set size \(kbytes\)") / 1024
+        rec.update(cpu_s=num(r"User time \(seconds\)") + num(r"System time \(seconds\)"),
+                   peak_mb=rss_mb, rss_mb=rss_mb)
+    else:
+        t = re.search(r"([\d.]+) real\s+([\d.]+) user\s+([\d.]+) sys", p.stderr)
+        rss = re.search(r"(\d+)\s+maximum resident set size", p.stderr)
+        # Peak footprint counts compressed/swapped pages too, so unlike max RSS it doesn't
+        # under-report when macOS is under memory pressure.
+        foot = re.search(r"(\d+)\s+peak memory footprint", p.stderr)
+        rec.update(cpu_s=float(t.group(2)) + float(t.group(3)), peak_mb=int(foot.group(1)) / 2**20,
+                   rss_mb=int(rss.group(1)) / 2**20)
     if mode == "multi":
         rec["front"] = [[float(a), -float(b)] for _, a, b in
                         (l.split("\t") for l in p.stdout.splitlines() if l.startswith("FRONT"))]
@@ -515,7 +540,9 @@ def driver(args):
     libs = opt.get("--libs", ",".join(RUST_LIBS + PY_LIBS)).split(",")
     out = opt.get("--out", os.path.join(HERE, "results_datasets.json"))
     prefix = opt.get("--prefix", "real_returns_")  # "returns_" = the older synthetic files
-    records = []
+    # --resume 1: keep finished runs from an earlier (e.g. preempted) invocation with the same --out.
+    records = json.load(open(out))["records"] if opt.get("--resume") and os.path.exists(out) else []
+    finished = {(r["lib"], r["size"], r["mode"], r["seed"]) for r in records if r["status"] in ("ok", "not built")}
     for size, nfe, runs in SIZES:
         if size not in sizes:
             continue
@@ -525,6 +552,8 @@ def driver(args):
                 if mode == "multi" and lib in SINGLE_ONLY:
                     continue
                 for run in range(runs):
+                    if (lib, size, mode, run + 1) in finished:
+                        continue
                     r = run_one(lib, size, mode, nfe, seed=run + 1, prefix=prefix)
                     records.append(r)
                     print(f"{size:>6} {mode:<6} {lib:<17} run{run} {r['status']:<7} "
