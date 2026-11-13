@@ -136,6 +136,7 @@ impl PyGpuProblem {
                 uses_python_callable: false,
                 // GPU trampoline is Rust-native; GIL release is safe in PyNSGAII::run
                 uses_batch_callable: false,
+                cfunc: None,
             },
         })
     }

@@ -1,6 +1,6 @@
 import os
 import pathlib
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 __version__: str
 
@@ -53,6 +53,9 @@ class Problem:
             Callable[[List[List[float]]], List[List[float]]]
         ] = None,
         permutation: bool = False,
+        batch_numpy: bool = False,
+        objective_cfunc: Optional[Any] = None,
+        cfunc_data: Optional[Any] = None,
     ) -> None: ...
 
 class GpuProblem:

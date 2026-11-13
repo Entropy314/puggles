@@ -36,6 +36,11 @@ pub(crate) struct StoreData {
 pub(crate) fn extract_store(py: Python<'_>, obj: &Py<PyAny>) -> PyResult<StoreData> {
     if let Ok(p) = obj.extract::<Py<PyProblem>>(py) {
         let b = p.borrow(py);
+        // Every run path extracts the store right before running, so this is the one place a
+        // GIL-free cfunc objective is published for its trampoline.
+        if let Some(cf) = &b.store.cfunc {
+            cf.activate();
+        }
         return Ok(StoreData {
             problem: Arc::clone(&b.store.problem),
             problem_id: b.store.problem_id,

@@ -140,3 +140,53 @@ def test_island_model_and_nsga3_batch_objective():
     ga = pg.NSGAIII(p, divisions=6, seed=3)
     ga.run(600)
     assert ga.nfe == 600 and ga.get_archive()
+
+
+# -- fast evaluation paths -------------------------------------------------------------------
+
+def test_batch_numpy_matches_the_list_batch():
+    np = pytest.importorskip("numpy")
+
+    def as_lists(pop):
+        return [zdt1(x) for x in pop]
+
+    def as_array(pop):
+        assert isinstance(pop, np.ndarray) and pop.shape[1] == 6
+        g = 1 + 9 * pop[:, 1:].sum(1) / 5
+        return np.column_stack([pop[:, 0], g * (1 - (pop[:, 0] / g) ** 0.5)])
+
+    fronts = []
+    for kw in ({"batch_objective_function": as_lists},
+               {"batch_objective_function": as_array, "batch_numpy": True}):
+        p = pg.Problem(6, 2, [pg.Real(0.0, 1.0)] * 6, direction=[-1, -1], **kw)
+        ga = pg.NSGAII(p, population_size=24, seed=4)
+        ga.run(1_500)
+        fronts.append(sorted(tuple(round(v, 9) for v in s.objectives) for s in ga.get_archive()))
+    assert fronts[0] == fronts[1]
+
+
+def test_cfunc_objective_runs_gil_free_and_rejects_bad_signatures():
+    nb = pytest.importorskip("numba")
+    np = pytest.importorskip("numpy")
+    weights = np.ascontiguousarray(np.arange(1.0, 7.0))
+
+    @nb.cfunc("void(CPointer(float64), int64, CPointer(float64), int64, voidptr)")
+    def weighted(x, n, out, m, data):
+        w = nb.carray(data, (n,), dtype=np.float64)
+        out[0] = 0.0
+        for i in range(n):
+            out[0] += w[i] * x[i]
+
+    p = pg.Problem(6, 1, [pg.Real(0.0, 1.0)] * 6, objective_cfunc=weighted, cfunc_data=weights)
+    ga = pg.NSGAII(p, population_size=30, execution_mode="multithreaded", seed=1)
+    ga.run(3_000)
+    best = min(ga.get_archive(), key=lambda s: s.objectives[0])
+    assert best.objectives[0] == pytest.approx(float(weights @ np.array(best.variables)))
+    assert best.objectives[0] < 0.5  # minimum is 0 at x = 0
+
+    @nb.cfunc("void(CPointer(float32), int64, CPointer(float64), int64, voidptr)")
+    def wrong(x, n, out, m, data):
+        out[0] = x[0]
+
+    with pytest.raises(TypeError):
+        pg.Problem(6, 1, [pg.Real(0.0, 1.0)] * 6, objective_cfunc=wrong)
